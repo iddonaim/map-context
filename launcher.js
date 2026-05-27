@@ -4,11 +4,41 @@ const express = require("express");
 const fs      = require("fs");
 const path    = require("path");
 const { spawn, exec } = require("child_process");
+const { runAnalysis } = require("./index");
 
 const PORT = 3111;
 
 const app = express();
 app.use(express.json());
+
+// ---- Endpoint: run analysis as a service --------------------
+
+app.post("/analyze", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin",  "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  const { address } = req.body || {};
+  if (!address || typeof address !== "string" || !address.trim()) {
+    return res.status(400).json({ error: "address is required" });
+  }
+
+  try {
+    const result = await runAnalysis(address.trim());
+    res.json(result);
+  } catch (err) {
+    const isGeocode = err.message && err.message.startsWith("No geocoding result");
+    const status = isGeocode ? 422 : 500;
+    res.status(status).json({ error: err.message || "Analysis failed" });
+  }
+});
+
+app.options("/analyze", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin",  "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(204);
+});
 
 // ---- Endpoint: write config.json and shut down ---------------
 

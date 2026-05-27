@@ -17,12 +17,6 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
-// Read address override from config.json if present
-try {
-  const _cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
-  if (_cfg.address) CONFIG.address = _cfg.address;
-} catch (_) {}
-
 // ---- Logging -----------------------------------------------
 
 function log(step, msg) {
@@ -2447,71 +2441,108 @@ document.querySelector('.tab[data-panel="panel-plans"]').addEventListener('click
 </html>`;
 }
 
-// ---- Main pipeline -----------------------------------------
+// ---- Core analysis pipeline --------------------------------
 
-async function run() {
-  console.log("\n╔══════════════════════════════════════╗");
-  console.log("║        CONTEXT MAPPER  v1.0          ║");
-  console.log("╚══════════════════════════════════════╝\n");
+async function runAnalysis(address) {
+  const center = await geocode(address);
 
-  try {
-    const center = await geocode(CONFIG.address);
+  const radius   = CONFIG.radius_meters;
+  const slug     = address.toLowerCase().replace(/[\s,]+/g, "-").replace(/-+/g, "-");
+  const outDir   = path.resolve(CONFIG.output_dir  ?? "./output");
+  const cacheDir = path.resolve(path.join(CONFIG.cache_dir ?? "./cache", slug));
+  fs.mkdirSync(outDir,   { recursive: true });
+  fs.mkdirSync(cacheDir, { recursive: true });
+  log("info", `Output dir: ${outDir}`);
+  log("info", `Cache dir:  ${cacheDir}`);
 
-    const slug     = CONFIG.address.toLowerCase().replace(/[\s,]+/g, "-").replace(/-+/g, "-");
-    const outDir   = path.resolve(CONFIG.output_dir  ?? "./output");
-    const cacheDir = path.resolve(path.join(CONFIG.cache_dir ?? "./cache", slug));
-    fs.mkdirSync(outDir,   { recursive: true });
-    fs.mkdirSync(cacheDir, { recursive: true });
-    log("info", `Output dir: ${outDir}`);
-    log("info", `Cache dir:  ${cacheDir}`);
+  // Buildings — GovMap (with Tel Aviv GIS fallback)
+  const buildings = await fetchGovMapBuildings(center.lat, center.lon, radius);
 
-    // Buildings — GovMap (with Tel Aviv GIS fallback)
-    const buildings = await fetchGovMapBuildings(center.lat, center.lon, CONFIG.radius_meters);
+  // Trees — Tel Aviv Open Data (gisn.tel-aviv.gov.il)
+  const trees = await fetchTelAvivTrees(center.lat, center.lon, radius);
 
-    // Trees — Tel Aviv Open Data (gisn.tel-aviv.gov.il)
-    const trees = await fetchTelAvivTrees(center.lat, center.lon, CONFIG.radius_meters);
+  // Streets + transit + institutions — OSM combined query
+  const osmQuery = buildCombinedOverpassQuery(center.lat, center.lon, radius);
+  const osmRaw   = await fetchOverpass(osmQuery);
+  const { streets, transit, institutions } = parseAllOSMData(osmRaw);
 
-    // Streets + transit + institutions — OSM combined query
-    const osmQuery = buildCombinedOverpassQuery(center.lat, center.lon, CONFIG.radius_meters);
-    const osmRaw   = await fetchOverpass(osmQuery);
-    const { streets, transit, institutions } = parseAllOSMData(osmRaw);
+  // Registration blocks — Tel Aviv GIS
+  const registrationBlocks = await fetchRegistrationBlocks(center.lat, center.lon, radius);
 
-    // Registration blocks — Tel Aviv GIS
-    const registrationBlocks = await fetchRegistrationBlocks(center.lat, center.lon, CONFIG.radius_meters);
+  const layers = { buildings, streets, trees, registrationBlocks, transit, institutions };
 
-    const layers = { buildings, streets, trees, registrationBlocks, transit, institutions };
+  // Run elevation, CBS, and TABA in parallel
+  const [elevation, cbsData, tabaData] = await Promise.all([
+    fetchElevation(center.lat, center.lon),
+    fetchCBSData(center.lat, center.lon).catch(e => {
+      log("warn", `CBS data fetch failed: ${e.message}`);
+      return null;
+    }),
+    fetchTABAData(center.lat, center.lon, slug, cacheDir, outDir).catch(e => {
+      log("warn", `TABA data fetch failed: ${e.message}`);
+      return { gush: null, chelka: null, plans: [], stats: { totalPlans: 0, withDocuments: 0, failedDownloads: 0 } };
+    }),
+  ]);
 
-    // Phase 1 complete — run elevation, CBS, and TABA in parallel
-    const [elevation, cbsData, tabaData] = await Promise.all([
-      fetchElevation(center.lat, center.lon),
-      fetchCBSData(center.lat, center.lon).catch(e => {
-        log("warn", `CBS data fetch failed: ${e.message}`);
-        return null;
-      }),
-      fetchTABAData(center.lat, center.lon, slug, cacheDir, outDir).catch(e => {
-        log("warn", `TABA data fetch failed: ${e.message}`);
-        return { gush: null, chelka: null, plans: [], stats: { totalPlans: 0, withDocuments: 0, failedDownloads: 0 } };
-      }),
-    ]);
-
-    if (tabaData) {
-      log("ok", `TABA summary: ${tabaData.stats.totalPlans} plans, ${tabaData.stats.withDocuments} with documents, ${tabaData.stats.failedDownloads} failed downloads`);
-    }
-
-    const html = buildHTML(CONFIG, center, layers, elevation, cbsData, tabaData);
-
-    const outPath = path.join(outDir, CONFIG.output_filename);
-    log("info", `Writing HTML to: ${outPath}`);
-    fs.writeFileSync(outPath, html, "utf8");
-
-    const sizeKB = (fs.statSync(outPath).size / 1024).toFixed(1);
-    log("ok", `Done! Output: ${outPath} (${sizeKB} KB)`);
-    console.log(`\n  Open in browser: file://${outPath}\n`);
-  } catch (err) {
-    log("err", err.message);
-    if (process.env.DEBUG) console.error(err.stack);
-    process.exit(1);
+  if (tabaData) {
+    log("ok", `TABA summary: ${tabaData.stats.totalPlans} plans, ${tabaData.stats.withDocuments} with documents, ${tabaData.stats.failedDownloads} failed downloads`);
   }
+
+  const runConfig = { ...CONFIG, address };
+  const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData);
+
+  const data = {
+    site_center: center,
+    site_radius: radius,
+    address,
+    elevation: elevation ?? null,
+    buildings,
+    streets,
+    trees,
+    institutions,
+    registration: registrationBlocks,
+    transit: {
+      lightrail: transit.lightRail,
+      train:     transit.train,
+    },
+    demographics: cbsData  ?? null,
+    taba:         tabaData ?? null,
+  };
+
+  return { html, data };
 }
 
-run();
+module.exports = { runAnalysis };
+
+// ---- CLI entry point ---------------------------------------
+
+if (require.main === module) {
+  // Read address override from config.json if present
+  try {
+    const _cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
+    if (_cfg.address) CONFIG.address = _cfg.address;
+  } catch (_) {}
+
+  (async () => {
+    console.log("\n╔══════════════════════════════════════╗");
+    console.log("║        CONTEXT MAPPER  v1.0          ║");
+    console.log("╚══════════════════════════════════════╝\n");
+
+    try {
+      const { html } = await runAnalysis(CONFIG.address);
+
+      const outDir  = path.resolve(CONFIG.output_dir ?? "./output");
+      const outPath = path.join(outDir, CONFIG.output_filename);
+      log("info", `Writing HTML to: ${outPath}`);
+      fs.writeFileSync(outPath, html, "utf8");
+
+      const sizeKB = (fs.statSync(outPath).size / 1024).toFixed(1);
+      log("ok", `Done! Output: ${outPath} (${sizeKB} KB)`);
+      console.log(`\n  Open in browser: file://${outPath}\n`);
+    } catch (err) {
+      log("err", err.message);
+      if (process.env.DEBUG) console.error(err.stack);
+      process.exit(1);
+    }
+  })();
+}
