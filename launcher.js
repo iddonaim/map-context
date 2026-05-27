@@ -4,6 +4,7 @@ const express = require("express");
 const fs      = require("fs");
 const path    = require("path");
 const { spawn, exec } = require("child_process");
+const axios           = require("axios");
 const { runAnalysis } = require("./index");
 
 const PORT = process.env.PORT || 3111;
@@ -38,6 +39,26 @@ app.options("/analyze", (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.sendStatus(204);
+});
+
+// ---- Endpoint: Nominatim proxy (avoids browser CORS/UA issues) -------
+
+app.get("/search", async (req, res) => {
+  const q = (req.query.q || "").trim();
+  if (!q) return res.json([]);
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5&countrycodes=il`;
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        "User-Agent":      "map-context/1.0 (contact@cuboidstudio.com)",
+        "Accept-Language": "he,en",
+      },
+      timeout: 8000,
+    });
+    res.json(response.data);
+  } catch (err) {
+    res.status(502).json({ error: "geocode lookup failed" });
+  }
 });
 
 // ---- Endpoint: write config.json and shut down ---------------
@@ -286,13 +307,12 @@ const HTML = `<!DOCTYPE html>
 
   function queryNominatim(q) {
     spinner.classList.add('active');
-    var url = 'https://nominatim.openstreetmap.org/search?q=' +
-      encodeURIComponent(q) + '&format=json&limit=5&countrycodes=il';
-    fetch(url, { headers: { 'Accept-Language': 'he,en' } })
+    var url = '/search?q=' + encodeURIComponent(q);
+    fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (results) {
         spinner.classList.remove('active');
-        renderDropdown(results);
+        renderDropdown(Array.isArray(results) ? results : []);
       })
       .catch(function () {
         spinner.classList.remove('active');
