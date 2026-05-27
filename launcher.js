@@ -6,7 +6,7 @@ const path    = require("path");
 const { spawn, exec } = require("child_process");
 const { runAnalysis } = require("./index");
 
-const PORT = 3111;
+const PORT = process.env.PORT || 3111;
 
 const app = express();
 app.use(express.json());

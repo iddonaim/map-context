@@ -4,7 +4,7 @@
   "description": "Autonomous urban site analysis dashboard generator for architectural projects",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node launcher.js",
     "run": "node index.js"
   },
   "dependencies": {
