@@ -32,7 +32,7 @@ async function geocode(address) {
   const url = "https://nominatim.openstreetmap.org/search";
   const res = await axios.get(url, {
     params: { q: address, format: "json", limit: 1 },
-    headers: { "User-Agent": "context-mapper/1.0 (architecture-tool)" },
+    headers: { "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
   });
   if (!res.data.length) throw new Error(`No geocoding result for: "${address}"`);
   const { lat, lon, display_name } = res.data[0];
@@ -71,7 +71,7 @@ async function fetchOverpass(query) {
   const reqHeaders = {
     ...headers,
     Accept: "*/*",
-    "User-Agent": "context-mapper/1.0 (architecture-tool)",
+    "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)",
   };
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
@@ -138,7 +138,7 @@ function radiusToBbox(lat, lon, radiusM) {
 }
 
 const ARCGIS_HEADERS = {
-  "User-Agent": "context-mapper/1.0 (architecture-tool)",
+  "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)",
   Accept: "*/*",
 };
 
@@ -475,6 +475,7 @@ const TABASEARCH_DOC_BASE   = "https://apps.land.gov.il";
 const TABASEARCH_HEADERS    = {
   "Content-Type": "application/json",
   "Referer":      "https://apps.land.gov.il/TabaSearch/",
+  "User-Agent":   "map-context/1.0 (contact@cuboidstudio.com)",
 };
 const TABASEARCH_PLAN_TYPES = [
   72, 21, 1, 8, 9, 10, 12, 20, 62, 31, 41, 25, 22, 2, 11, 13,
@@ -601,7 +602,7 @@ async function tryDownloadFile(url, magic) {
       const res = await axios.get(url, {
         responseType: "arraybuffer",
         timeout: 60000,
-        headers: { Referer: "https://apps.land.gov.il/TabaSearch/" },
+        headers: { Referer: "https://apps.land.gov.il/TabaSearch/", "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
         validateStatus: s => s < 500,
       });
       if (res.status === 404) return null;
@@ -674,6 +675,7 @@ async function fetchMeirimPolygons(lon, lat) {
   const res = await axios.get(`${MEIRIM_API_BASE}/api/plan`, {
     params: { distancePoint: `${lon},${lat}` },
     timeout: 15000,
+    headers: { "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
   });
   const meirimPlans = res.data?.data ?? [];
   log("info", `[TABA-G] Meirim returned ${meirimPlans.length} plans`);
@@ -842,7 +844,7 @@ function parseAllOSMData(osmData) {
 
 const DATAGOV_BASE = "https://data.gov.il/api/3/action";
 const DATAGOV_HEADERS = {
-  "User-Agent": "context-mapper/1.0 (architecture-tool)",
+  "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)",
   Accept: "application/json",
 };
 
@@ -1186,7 +1188,7 @@ async function fetchElevation(lat, lon) {
     try {
       const res = await axios.get(api.url, {
         timeout: 8000,
-        headers: { "User-Agent": "context-mapper/1.0 (architecture-tool)" },
+        headers: { "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
       });
       const elev = api.parse(res.data);
       if (elev !== null && elev !== undefined) {
