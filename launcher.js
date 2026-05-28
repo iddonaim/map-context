@@ -66,7 +66,12 @@ app.post("/run", async (req, res) => {
   if (!address) return res.status(400).json({ status: "error", message: "address required" });
   try {
     const result = await runAnalysis(address.trim());
-    res.json({ status: "done", html: result.html });
+    // Embed SITE_DATA as a JSON constant and fire postMessage when the dashboard iframe loads.
+    // </script> inside JSON values is escaped to <\/script> so the HTML parser won't close the tag early.
+    const safeJson = JSON.stringify(result.data).replace(/<\/script>/gi, '<\\/script>');
+    const pmScript = '<script>(function(){var SITE_DATA=' + safeJson + ';window.parent.postMessage({type:"analysis-complete",data:SITE_DATA},"*");})();<\/script>';
+    const html = result.html.replace('</body>', pmScript + '</body>');
+    res.json({ status: "done", html });
   } catch (err) {
     res.status(500).json({ status: "error", message: err.message || "Analysis failed" });
   }
