@@ -693,7 +693,7 @@ async function fetchMeirimPolygons(lon, lat) {
 
 // ── Step D: Main orchestrator ────────────────────────────────
 
-async function fetchTABAData(lat, lon, slug, cacheDir, outDir) {
+async function fetchTABAData(lat, lon, slug, cacheDir, outDir, onProgress) {
   log("info", 'Phase 3: TABA — Statutory Urban Plans (תב"עות)');
 
   const tabaDir       = path.join(cacheDir, "taba");
@@ -722,6 +722,7 @@ async function fetchTABAData(lat, lon, slug, cacheDir, outDir) {
   out.chelka = parcel.chelka;
 
   // Step B — fetch plans from TabaSearch
+  if (onProgress) onProgress({ step: "taba_lookup", label: "Loading statutory plans", percent: 58 });
   let rawPlans = [];
   if (parcel.gush) {
     try {
@@ -738,6 +739,7 @@ async function fetchTABAData(lat, lon, slug, cacheDir, outDir) {
 
   if (plans.length > 0) {
     // Step C — download documents (non-fatal)
+    if (onProgress) onProgress({ step: "taba_docs", label: "Downloading plan documents", percent: 80 });
     try {
       const { totalDownloaded, totalFailed } = await downloadTabaSearchDocs(plans, cacheDir, outDir);
       out.stats.withDocuments   = plans.filter(p => p.documents.takanon || p.documents.tasrit || p.documents.mmg).length;
@@ -748,6 +750,7 @@ async function fetchTABAData(lat, lon, slug, cacheDir, outDir) {
     }
 
     // Step G — fetch Meirim polygons as a separate spatial layer (non-fatal)
+    if (onProgress) onProgress({ step: "meirim", label: "Fetching plan geometries", percent: 88 });
     try {
       out.meirimPolygons = await fetchMeirimPolygons(lon, lat);
     } catch (e) {
@@ -2445,7 +2448,10 @@ document.querySelector('.tab[data-panel="panel-plans"]').addEventListener('click
 
 // ---- Core analysis pipeline --------------------------------
 
-async function runAnalysis(address) {
+async function runAnalysis(address, onProgress) {
+  const cb = typeof onProgress === "function" ? onProgress : null;
+
+  if (cb) cb({ step: "geocoding", label: "Locating address", percent: 5 });
   const center = await geocode(address);
 
   const radius   = CONFIG.radius_meters;
@@ -2458,29 +2464,34 @@ async function runAnalysis(address) {
   log("info", `Cache dir:  ${cacheDir}`);
 
   // Buildings — GovMap (with Tel Aviv GIS fallback)
+  if (cb) cb({ step: "buildings", label: "Fetching buildings", percent: 15 });
   const buildings = await fetchGovMapBuildings(center.lat, center.lon, radius);
 
   // Trees — Tel Aviv Open Data (gisn.tel-aviv.gov.il)
+  if (cb) cb({ step: "trees", label: "Fetching trees", percent: 25 });
   const trees = await fetchTelAvivTrees(center.lat, center.lon, radius);
 
   // Streets + transit + institutions — OSM combined query
+  if (cb) cb({ step: "streets", label: "Fetching streets & transit", percent: 35 });
   const osmQuery = buildCombinedOverpassQuery(center.lat, center.lon, radius);
   const osmRaw   = await fetchOverpass(osmQuery);
   const { streets, transit, institutions } = parseAllOSMData(osmRaw);
 
   // Registration blocks — Tel Aviv GIS
+  if (cb) cb({ step: "registration", label: "Fetching registration blocks", percent: 42 });
   const registrationBlocks = await fetchRegistrationBlocks(center.lat, center.lon, radius);
 
   const layers = { buildings, streets, trees, registrationBlocks, transit, institutions };
 
-  // Run elevation, CBS, and TABA in parallel
+  // Run elevation, CBS, and TABA in parallel (TABA emits its own sub-step progress)
+  if (cb) cb({ step: "elevation_cbs", label: "Elevation & demographics", percent: 50 });
   const [elevation, cbsData, tabaData] = await Promise.all([
     fetchElevation(center.lat, center.lon),
     fetchCBSData(center.lat, center.lon).catch(e => {
       log("warn", `CBS data fetch failed: ${e.message}`);
       return null;
     }),
-    fetchTABAData(center.lat, center.lon, slug, cacheDir, outDir).catch(e => {
+    fetchTABAData(center.lat, center.lon, slug, cacheDir, outDir, cb).catch(e => {
       log("warn", `TABA data fetch failed: ${e.message}`);
       return { gush: null, chelka: null, plans: [], stats: { totalPlans: 0, withDocuments: 0, failedDownloads: 0 } };
     }),
@@ -2490,6 +2501,7 @@ async function runAnalysis(address) {
     log("ok", `TABA summary: ${tabaData.stats.totalPlans} plans, ${tabaData.stats.withDocuments} with documents, ${tabaData.stats.failedDownloads} failed downloads`);
   }
 
+  if (cb) cb({ step: "compiling", label: "Compiling dashboard", percent: 95 });
   const runConfig = { ...CONFIG, address };
   const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData);
 
@@ -2511,6 +2523,7 @@ async function runAnalysis(address) {
     taba:         tabaData ?? null,
   };
 
+  if (cb) cb({ step: "done", label: "Done", percent: 100 });
   return { html, data };
 }
 
