@@ -2050,8 +2050,8 @@ function initMap3D() {
       ],
     },
     center:  [SITE_CENTER.lon, SITE_CENTER.lat],
-    zoom:    15,
-    pitch:   45,
+    zoom:    16,
+    pitch:   60,
     bearing: 0,
   });
 
