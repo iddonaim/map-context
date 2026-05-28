@@ -59,21 +59,42 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// ---- Endpoint: run analysis and return HTML inline -----------
+// ---- Endpoint: run analysis, stream progress via SSE --------
 
 app.post("/run", async (req, res) => {
   const { address } = req.body;
-  if (!address) return res.status(400).json({ status: "error", message: "address required" });
+  if (!address) {
+    res.setHeader("Content-Type", "application/json");
+    return res.status(400).json({ status: "error", message: "address required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const sendEvent = (type, data) => {
+    if (type === "progress") {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } else {
+      res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
+  };
+
   try {
-    const result = await runAnalysis(address.trim());
+    const result = await runAnalysis(address.trim(), (progress) => {
+      sendEvent("progress", progress);
+    });
     // Embed SITE_DATA as a JSON constant and fire postMessage when the dashboard iframe loads.
     // </script> inside JSON values is escaped to <\/script> so the HTML parser won't close the tag early.
     const safeJson = JSON.stringify(result.data).replace(/<\/script>/gi, '<\\/script>');
     const pmScript = '<script>(function(){var SITE_DATA=' + safeJson + ';window.parent.postMessage({type:"analysis-complete",data:SITE_DATA},"*");})();<\/script>';
     const html = result.html.replace('</body>', pmScript + '</body>');
-    res.json({ status: "done", html });
+    sendEvent("complete", { html });
+    res.end();
   } catch (err) {
-    res.status(500).json({ status: "error", message: err.message || "Analysis failed" });
+    sendEvent("error", { message: err.message || "Analysis failed" });
+    res.end();
   }
 });
 
@@ -177,6 +198,65 @@ const HTML = `<!DOCTYPE html>
   .spinner.active { display: block; }
   @keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
 
+  .progress-wrap {
+    margin-top: 20px;
+    display: none;
+  }
+  .progress-wrap.show { display: block; }
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .progress-step-label {
+    font-size: 13px;
+    color: #555;
+  }
+  .progress-pct {
+    font-size: 13px;
+    font-weight: 600;
+    color: #111;
+  }
+  .progress-track {
+    height: 6px;
+    background: #e8e8e8;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: #111;
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.35s ease;
+  }
+  .error-msg {
+    margin-top: 16px;
+    display: none;
+    padding: 12px 14px;
+    background: #fff5f5;
+    border: 1px solid #fca5a5;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #b91c1c;
+  }
+  .error-msg.show { display: block; }
+  .retry-btn {
+    display: inline-block;
+    margin-top: 10px;
+    padding: 8px 16px;
+    background: #111;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .retry-btn:hover { background: #333; }
+
   .confirm-card {
     margin-top: 24px;
     padding: 20px 20px;
@@ -218,26 +298,6 @@ const HTML = `<!DOCTYPE html>
   button#run-btn.show { display: block; }
   button#run-btn:disabled { background: #aaa; cursor: default; }
 
-  .status-msg {
-    margin-top: 16px;
-    display: none;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    color: #555;
-  }
-  .status-msg.show { display: flex; }
-  .pulse-dot {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    background: #4a90d9;
-    flex-shrink: 0;
-    animation: pulse 1.4s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50%       { opacity: .4; transform: scale(.7); }
-  }
 </style>
 </head>
 <body>
@@ -258,24 +318,42 @@ const HTML = `<!DOCTYPE html>
   </div>
 
   <button id="run-btn">הפעל ניתוח</button>
-  <div class="status-msg" id="status-msg">
-    <div class="pulse-dot"></div>
-    <span>מריץ ניתוח... זה יכול לקחת מספר דקות</span>
+
+  <div class="progress-wrap" id="progress-wrap">
+    <div class="progress-header">
+      <span class="progress-step-label" id="progress-label">מתחיל...</span>
+      <span class="progress-pct" id="progress-pct">0%</span>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+  </div>
+
+  <div class="error-msg" id="error-msg">
+    <span id="error-text"></span>
+    <br>
+    <button class="retry-btn" id="retry-btn">נסה שנית</button>
   </div>
 </div>
 
 <script>
 (function () {
-  var input       = document.getElementById('addr-input');
-  var dropdown    = document.getElementById('dropdown');
-  var spinner     = document.getElementById('spinner');
-  var confirmCard = document.getElementById('confirm-card');
-  var confirmAddr = document.getElementById('confirm-address');
-  var confirmCad  = document.getElementById('confirm-cadastral');
-  var runBtn      = document.getElementById('run-btn');
-  var statusMsg   = document.getElementById('status-msg');
+  var input        = document.getElementById('addr-input');
+  var dropdown     = document.getElementById('dropdown');
+  var spinner      = document.getElementById('spinner');
+  var confirmCard  = document.getElementById('confirm-card');
+  var confirmAddr  = document.getElementById('confirm-address');
+  var confirmCad   = document.getElementById('confirm-cadastral');
+  var runBtn       = document.getElementById('run-btn');
+  var progressWrap = document.getElementById('progress-wrap');
+  var progressLabel= document.getElementById('progress-label');
+  var progressPct  = document.getElementById('progress-pct');
+  var progressFill = document.getElementById('progress-fill');
+  var errorMsg     = document.getElementById('error-msg');
+  var errorText    = document.getElementById('error-text');
+  var retryBtn     = document.getElementById('retry-btn');
 
-  var debounceTimer = null;
+  var debounceTimer   = null;
   var selectedAddress = null;
   var selectedLat     = null;
   var selectedLon     = null;
@@ -349,53 +427,119 @@ const HTML = `<!DOCTYPE html>
     runBtn.classList.add('show');
   }
 
-  // ---- Run Analysis -----------------------------------------
+  // ---- Progress helpers ------------------------------------
+
+  function setProgress(label, pct) {
+    progressLabel.textContent = label;
+    progressPct.textContent   = pct + '%';
+    progressFill.style.width  = pct + '%';
+  }
+
+  function showError(message) {
+    progressWrap.classList.remove('show');
+    errorText.textContent = 'שגיאה: ' + (message || 'ניתוח נכשל');
+    errorMsg.classList.add('show');
+    runBtn.disabled = false;
+  }
+
+  function showDashboard(html) {
+    var backBtn = document.createElement('button');
+    backBtn.textContent = '← ניתוח חדש';
+    backBtn.style.cssText = [
+      'position:fixed', 'top:12px', 'left:12px', 'z-index:9999',
+      'padding:8px 14px', 'background:#111', 'color:#fff',
+      'border:none', 'border-radius:6px', 'font-size:13px',
+      'font-weight:600', 'cursor:pointer', 'box-shadow:0 2px 8px rgba(0,0,0,.3)',
+      'transition:background .15s',
+    ].join(';');
+    backBtn.addEventListener('mouseover',  function () { backBtn.style.background = '#333'; });
+    backBtn.addEventListener('mouseout',   function () { backBtn.style.background = '#111'; });
+    backBtn.addEventListener('click', function () { window.location.reload(); });
+
+    var frame = document.createElement('iframe');
+    frame.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9998';
+    frame.srcdoc = html;
+
+    document.body.innerHTML = '';
+    document.body.style.margin = '0';
+    document.body.appendChild(frame);
+    document.body.appendChild(backBtn);
+  }
+
+  // ---- Run Analysis via SSE --------------------------------
+
+  retryBtn.addEventListener('click', function () {
+    errorMsg.classList.remove('show');
+    runAnalysis();
+  });
 
   runBtn.addEventListener('click', function () {
     if (!selectedAddress) return;
+    runAnalysis();
+  });
+
+  function runAnalysis() {
     runBtn.disabled = true;
-    statusMsg.classList.add('show');
+    errorMsg.classList.remove('show');
+    setProgress('מתחיל...', 0);
+    progressWrap.classList.add('show');
+
     fetch('/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: selectedAddress, lat: selectedLat, lon: selectedLon }),
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.status === 'done' && data.html) {
-          // Build a back button fixed in the top-left corner
-          var backBtn = document.createElement('button');
-          backBtn.textContent = '← ניתוח חדש';
-          backBtn.style.cssText = [
-            'position:fixed', 'top:12px', 'left:12px', 'z-index:9999',
-            'padding:8px 14px', 'background:#111', 'color:#fff',
-            'border:none', 'border-radius:6px', 'font-size:13px',
-            'font-weight:600', 'cursor:pointer', 'box-shadow:0 2px 8px rgba(0,0,0,.3)',
-            'transition:background .15s',
-          ].join(';');
-          backBtn.addEventListener('mouseover',  function () { backBtn.style.background = '#333'; });
-          backBtn.addEventListener('mouseout',   function () { backBtn.style.background = '#111'; });
-          backBtn.addEventListener('click', function () { window.location.reload(); });
+    }).then(function (response) {
+      if (!response.ok || !response.body) {
+        return response.json().then(function (d) {
+          throw new Error(d.message || 'Analysis failed');
+        });
+      }
 
-          // Full-screen iframe carrying the analysis HTML
-          var frame = document.createElement('iframe');
-          frame.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9998';
-          frame.srcdoc = data.html;
+      var reader  = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer  = '';
 
-          document.body.innerHTML = '';
-          document.body.style.margin = '0';
-          document.body.appendChild(frame);
-          document.body.appendChild(backBtn);
-        } else {
-          statusMsg.innerHTML = '<span style="color:#c00">שגיאה: ' + (data.message || 'ניתוח נכשל') + '</span>';
-          runBtn.disabled = false;
-        }
-      })
-      .catch(function () {
-        statusMsg.innerHTML = '<span style="color:#c00">שגיאת תקשורת — נסה שנית</span>';
-        runBtn.disabled = false;
-      });
-  });
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) return;
+          buffer += decoder.decode(chunk.value, { stream: true });
+
+          // Split on double newline (SSE event boundary)
+          var events = buffer.split('\n\n');
+          buffer = events.pop(); // keep incomplete tail
+
+          events.forEach(function (eventStr) {
+            if (!eventStr.trim()) return;
+            var eventType = 'progress';
+            var dataStr   = '';
+            eventStr.split('\n').forEach(function (line) {
+              if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+              if (line.startsWith('data: '))  dataStr   = line.slice(6).trim();
+            });
+            if (!dataStr) return;
+
+            var data;
+            try { data = JSON.parse(dataStr); } catch (_) { return; }
+
+            if (eventType === 'progress') {
+              setProgress(data.label, data.percent);
+            } else if (eventType === 'complete') {
+              setProgress('בוצע', 100);
+              showDashboard(data.html);
+            } else if (eventType === 'error') {
+              showError(data.message);
+            }
+          });
+
+          return pump();
+        });
+      }
+
+      return pump();
+    }).catch(function (err) {
+      showError(err.message || 'שגיאת תקשורת');
+    });
+  }
 })();
 </script>
 </body>
