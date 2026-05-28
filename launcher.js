@@ -1,9 +1,7 @@
 // ADDRESS LAUNCHER — select address, then run analysis
 
 const express = require("express");
-const fs      = require("fs");
 const path    = require("path");
-const { spawn, exec } = require("child_process");
 const axios           = require("axios");
 const { runAnalysis } = require("./index");
 
@@ -61,28 +59,17 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// ---- Endpoint: write config.json and shut down ---------------
+// ---- Endpoint: run analysis and return HTML inline -----------
 
-app.post("/run", (req, res) => {
+app.post("/run", async (req, res) => {
   const { address } = req.body;
-  if (!address) return res.status(400).json({ error: "address required" });
-  fs.writeFileSync(
-    path.join(__dirname, "config.json"),
-    JSON.stringify({ address }, null, 2),
-    "utf8"
-  );
-  res.json({ status: "started" });
-  setTimeout(() => {
-    const child = spawn("node", ["index.js"], {
-      stdio: "inherit",
-      cwd: __dirname,
-      detached: true,
-    });
-    child.on("close", (code) => {
-      if (code === 0) exec(`open "${path.join(__dirname, "output/site_analysis.html")}"`);
-    });
-    child.unref();
-  }, 100);
+  if (!address) return res.status(400).json({ status: "error", message: "address required" });
+  try {
+    const result = await runAnalysis(address.trim());
+    res.json({ status: "done", html: result.html });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message || "Analysis failed" });
+  }
 });
 
 // ---- Main page -----------------------------------------------
@@ -367,7 +354,42 @@ const HTML = `<!DOCTYPE html>
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: selectedAddress, lat: selectedLat, lon: selectedLon }),
-    }).catch(function () {});
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.status === 'done' && data.html) {
+          // Build a back button fixed in the top-left corner
+          var backBtn = document.createElement('button');
+          backBtn.textContent = '← ניתוח חדש';
+          backBtn.style.cssText = [
+            'position:fixed', 'top:12px', 'left:12px', 'z-index:9999',
+            'padding:8px 14px', 'background:#111', 'color:#fff',
+            'border:none', 'border-radius:6px', 'font-size:13px',
+            'font-weight:600', 'cursor:pointer', 'box-shadow:0 2px 8px rgba(0,0,0,.3)',
+            'transition:background .15s',
+          ].join(';');
+          backBtn.addEventListener('mouseover',  function () { backBtn.style.background = '#333'; });
+          backBtn.addEventListener('mouseout',   function () { backBtn.style.background = '#111'; });
+          backBtn.addEventListener('click', function () { window.location.reload(); });
+
+          // Full-screen iframe carrying the analysis HTML
+          var frame = document.createElement('iframe');
+          frame.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9998';
+          frame.srcdoc = data.html;
+
+          document.body.innerHTML = '';
+          document.body.style.margin = '0';
+          document.body.appendChild(frame);
+          document.body.appendChild(backBtn);
+        } else {
+          statusMsg.innerHTML = '<span style="color:#c00">שגיאה: ' + (data.message || 'ניתוח נכשל') + '</span>';
+          runBtn.disabled = false;
+        }
+      })
+      .catch(function () {
+        statusMsg.innerHTML = '<span style="color:#c00">שגיאת תקשורת — נסה שנית</span>';
+        runBtn.disabled = false;
+      });
   });
 })();
 </script>
