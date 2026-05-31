@@ -1300,6 +1300,7 @@ makeToggle('toggle-stat-area', layerStatArea);`
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"><\/script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; margin: 0; }
   body { display: flex; flex-direction: column; height: 100vh; font-family: 'Helvetica Neue', Arial, sans-serif; background: #f5f5f3; color: #222; }
 
   /* ── Tab bar ───────────────────────────────────────────── */
