@@ -505,14 +505,14 @@ const HTML = `<!DOCTYPE html>
           buffer += decoder.decode(chunk.value, { stream: true });
 
           // Split on double newline (SSE event boundary)
-          var events = buffer.split('\n\n');
+          var events = buffer.split('\\n\\n');
           buffer = events.pop(); // keep incomplete tail
 
           events.forEach(function (eventStr) {
             if (!eventStr.trim()) return;
             var eventType = 'progress';
             var dataStr   = '';
-            eventStr.split('\n').forEach(function (line) {
+            eventStr.split('\\n').forEach(function (line) {
               if (line.startsWith('event: ')) eventType = line.slice(7).trim();
               if (line.startsWith('data: '))  dataStr   = line.slice(6).trim();
             });
