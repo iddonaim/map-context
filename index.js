@@ -223,13 +223,46 @@ async function arcgisQueryFeatures(layerUrl, bbox) {
   return allFeatures;
 }
 
-/** Convert an ArcGIS Polygon (rings) feature to GeoJSON. */
+/** Signed area of a ring (shoelace formula). Positive = clockwise in screen coords (Esri exterior); negative = counterclockwise (Esri hole). */
+function ringSignedArea(ring) {
+  let sum = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[i + 1];
+    sum += x1 * y2 - x2 * y1;
+  }
+  return sum / 2;
+}
+
+/**
+ * Convert an ArcGIS Polygon (rings) feature to GeoJSON.
+ * Esri flattens exterior rings and holes into a single `rings` array, using
+ * clockwise = exterior / counterclockwise = hole (opposite of GeoJSON's
+ * right-hand rule). Holes must be nested under the exterior ring they fall
+ * inside, not emitted as standalone polygons.
+ */
 function esriPolygonToGeoJSON(esriFeat, extraProps) {
-  const rings = esriFeat.geometry?.rings;
-  if (!rings?.length) return null;
-  const geometry = rings.length === 1
-    ? { type: "Polygon",      coordinates: rings }
-    : { type: "MultiPolygon", coordinates: rings.map((r) => [r]) };
+  const rings = (esriFeat.geometry?.rings || []).filter(
+    (r) => r?.length >= 4 && ringSignedArea(r) !== 0
+  );
+  if (!rings.length) return null;
+
+  // Esri convention: signed area < 0 (counterclockwise) = exterior, > 0 (clockwise) = hole.
+  const polygons = [];
+  for (const ring of rings) {
+    if (ringSignedArea(ring) < 0) {
+      polygons.push([ring]);
+    } else {
+      // Hole: attach to the most recently seen exterior ring, if any.
+      const parent = polygons[polygons.length - 1];
+      if (parent) parent.push(ring);
+      else polygons.push([ring]); // no preceding exterior; treat as its own polygon
+    }
+  }
+
+  const geometry = polygons.length === 1
+    ? { type: "Polygon",      coordinates: polygons[0] }
+    : { type: "MultiPolygon", coordinates: polygons };
   return {
     type: "Feature",
     geometry,
@@ -1650,6 +1683,8 @@ ${cbsDemographicsHTML}
     <div id="map-wrapper">
       <div id="map-2d"></div>
       <div id="map-3d"></div>
+      <div id="map3d-diag" style="display:none; position:absolute; bottom:10px; left:10px; z-index:50; background:rgba(0,0,0,0.75); color:#0f0; font:11px monospace; padding:6px 10px; border-radius:4px; max-width:90%; white-space:pre-wrap;"></div>
+      <div id="map3d-error" style="display:none; position:absolute; top:10px; left:10px; right:10px; z-index:50; background:#c0392b; color:#fff; font:12px sans-serif; padding:10px 14px; border-radius:6px; white-space:pre-wrap;"></div>
     </div>
   </div><!-- /panel-map -->
 
@@ -2004,7 +2039,29 @@ function sync3DVisibility() {
   });
 });
 
+function showMap3DError(err) {
+  var box = document.getElementById('map3d-error');
+  if (!box) return;
+  box.textContent = '3D view failed to load: ' + (err && err.message ? err.message : String(err));
+  box.style.display = 'block';
+}
+
+function updateMap3DDiagnostics() {
+  var box = document.getElementById('map3d-diag');
+  if (!box) return;
+  var total = (DATA_BUILDINGS.features || []).length;
+  var rendered = 'n/a';
+  try {
+    if (map3d && map3d.isStyleLoaded() && map3d.getLayer('buildings-3d')) {
+      rendered = map3d.queryRenderedFeatures({ layers: ['buildings-3d'] }).length;
+    }
+  } catch (e) { /* style/canvas not ready yet */ }
+  box.textContent = 'Buildings: ' + rendered + ' rendered / ' + total + ' total';
+  box.style.display = 'block';
+}
+
 function initMap3D() {
+ try {
   map3d = new maplibregl.Map({
     container: 'map-3d',
     style: {
@@ -2059,7 +2116,14 @@ function initMap3D() {
     bearing: 0,
   });
 
-  map3d.on('load', function() { sync3DVisibility(); });
+  map3d.on('load', function() {
+    sync3DVisibility();
+    updateMap3DDiagnostics();
+    map3d.on('moveend', updateMap3DDiagnostics);
+  });
+  map3d.on('error', function(e) {
+    showMap3DError(e && e.error ? e.error : e);
+  });
 
   map3d.on('click', 'buildings-3d', function(e) {
     if (!e.features || !e.features.length) return;
@@ -2082,6 +2146,9 @@ function initMap3D() {
   });
   map3d.on('mouseenter', 'buildings-3d', function() { map3d.getCanvas().style.cursor = 'pointer'; });
   map3d.on('mouseleave', 'buildings-3d', function() { map3d.getCanvas().style.cursor = ''; });
+ } catch (err) {
+   showMap3DError(err);
+ }
 }
 
 function toggleView() {
