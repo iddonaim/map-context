@@ -62,6 +62,7 @@ The result is written to `output/tel-aviv-atlas.html`.
 | WASD | Move (Fly and Walk modes; Space/C = up/down in Fly) |
 | Double-click | Fly to that spot |
 | **N** | Day / night (night turns on windows + street lights) |
+| ☀ button | Sun & shade study: true cast shadows for a chosen month + time (Israel clock), with the sun-path arc, hour markers and a compass |
 | **T** or ▶ | Guided landmark tour |
 | **R** or ⌂ | Reset view |
 | Search bar | Landmarks, neighborhoods, streets (English or Hebrew) |

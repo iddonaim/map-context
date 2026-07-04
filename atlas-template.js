@@ -94,6 +94,16 @@ canvas#scene { position: fixed; inset: 0; display: block; }
 #card .meta { margin-top: 10px; font-size: 11px; color: #8b93a8; }
 #card .x { position: absolute; top: 10px; right: 12px; background: none; border: none; color: #8b93a8; font-size: 15px; cursor: pointer; }
 
+/* Sun panel */
+#sunpanel { position: fixed; top: 58px; right: 60px; width: 240px; background: rgba(16,20,32,.92); border: 1px solid rgba(255,255,255,.14); border-radius: 14px; padding: 14px 16px; z-index: 24; display: none; backdrop-filter: blur(10px); }
+#sunpanel.open { display: block; }
+#sunpanel .sp-head { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; font-weight: 700; margin-bottom: 10px; }
+#sunpanel .sp-head button { background: none; border: none; color: #8b93a8; cursor: pointer; font-size: 13px; }
+#sunpanel label { display: flex; justify-content: space-between; font-size: 11px; color: #aab2c8; margin: 8px 0 4px; }
+#sunpanel label span { color: #f0b429; font-weight: 700; }
+#sunpanel input[type=range] { width: 100%; accent-color: #f0b429; }
+#sunpanel .sp-read { margin-top: 10px; font-size: 11px; color: #8b93a8; line-height: 1.6; }
+
 /* Attribution */
 #attrib { position: fixed; bottom: 12px; left: 16px; font-size: 10.5px; color: rgba(170,178,200,.75); z-index: 10; pointer-events: none; text-shadow: 0 1px 4px rgba(0,0,0,.7); }
 #attrib .mock { color: #f08b8b; font-weight: 700; }
@@ -109,11 +119,20 @@ const HTML_BODY = `
 <div id="modes"><button data-mode="orbit" class="on">Orbit</button><button data-mode="fly">Fly</button><button data-mode="walk">Walk</button></div>
 <div id="tools">
   <button id="btn-night" title="Day / night (N)">☾</button>
+  <button id="btn-sun" title="Sun &amp; shade study">☀</button>
   <button id="btn-tour" title="Landmark tour (T)">▶</button>
   <button id="btn-reset" title="Reset view (R)">⌂</button>
   <button id="btn-full" title="Fullscreen">⛶</button>
 </div>
 <div id="toast"></div>
+<div id="sunpanel">
+  <div class="sp-head"><span>Sun &amp; shade · שמש וצל</span><button id="sun-x">✕</button></div>
+  <label>Month · חודש <span id="sun-month-v"></span></label>
+  <input id="sun-month" type="range" min="0" max="11" step="1" value="5">
+  <label>Time · שעה <span id="sun-time-v"></span></label>
+  <input id="sun-time" type="range" min="5" max="20" step="0.25" value="14">
+  <div class="sp-read" id="sun-read"></div>
+</div>
 <div id="card"><button class="x" id="card-x">✕</button><span class="kind" id="card-kind"></span><h2 id="card-name"></h2><div class="he" id="card-he"></div><p id="card-blurb"></p><div class="meta" id="card-meta"></div></div>
 <div id="hints"><span><b>Drag</b> rotate</span><span><b>Scroll</b> zoom</span><span><b>WASD</b> move</span><span><b>Dbl-click</b> fly to</span><span><b>T</b> tour</span><span><b>N</b> night</span></div>
 <div id="minimap"><canvas id="minimap-canvas" width="336" height="336"></canvas></div>
@@ -150,6 +169,8 @@ var canvas = document.getElementById('scene');
 var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 var scene = new THREE.Scene();
 var camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, R * 12);
 
@@ -271,13 +292,47 @@ function hash01(i) { var x = Math.sin(i * 127.1) * 43758.5453; return x - Math.f
 function buildBuildings() {
   var pos = [], col = [];
   var c = new THREE.Color();
+
+  function toV2(ring) {
+    var v2 = [];
+    for (var k = 0; k < ring.length; k++) v2.push(new THREE.Vector2(ring[k][0], -ring[k][1]));
+    return v2;
+  }
+  function ringArea(v2) { return Math.abs(THREE.ShapeUtils.area(v2)); }
+  function pushWalls(ring, h) {
+    var n = ring.length;
+    for (var e = 0; e < n; e++) {
+      var p1 = ring[e], p2 = ring[(e + 1) % n];
+      pos.push(p1[0], 0, p1[1], p2[0], 0, p2[1], p2[0], h, p2[1]);
+      pos.push(p1[0], 0, p1[1], p2[0], h, p2[1], p1[0], h, p1[1]);
+      // slightly darker walls than roof for depth
+      for (var w6 = 0; w6 < 6; w6++) col.push(c.r * 0.88, c.g * 0.88, c.b * 0.9);
+    }
+  }
+  function pushRoofTris(all, tris, h) {
+    for (var t = 0; t < tris.length; t++) {
+      var tr = tris[t];
+      // shape space y = -z → world z; CCW-in-shape-space maps to an
+      // upward normal, so keep the triangulator's vertex order
+      pos.push(all[tr[0]].x, h, -all[tr[0]].y, all[tr[1]].x, h, -all[tr[1]].y, all[tr[2]].x, h, -all[tr[2]].y);
+      for (var r3 = 0; r3 < 3; r3++) col.push(c.r, c.g, c.b);
+    }
+  }
+  function trisArea(all, tris) {
+    var a = 0;
+    for (var t = 0; t < tris.length; t++) {
+      var p0 = all[tris[t][0]], p1 = all[tris[t][1]], p2 = all[tris[t][2]];
+      a += Math.abs((p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y)) / 2;
+    }
+    return a;
+  }
+
   for (var i = 0; i < A.buildings.length; i++) {
     var b = A.buildings[i];
     var ring = b.p;
     if (ring.length < 3) continue;
-    // enforce CCW in shape space for consistent normals/triangulation
-    var v2 = [];
-    for (var k = 0; k < ring.length; k++) v2.push(new THREE.Vector2(ring[k][0], -ring[k][1]));
+    // enforce CCW outer in shape space for consistent normals/triangulation
+    var v2 = toV2(ring);
     if (THREE.ShapeUtils.area(v2) < 0) { v2.reverse(); ring = ring.slice().reverse(); }
     var h = Math.max(b.h, 3);
     // color: landmarks glow-tinted, others warm off-whites with slight variation
@@ -286,24 +341,43 @@ function buildBuildings() {
       var v = 0.82 + hash01(i) * 0.15;
       c.setRGB(v, v * (0.97 + hash01(i + 7) * 0.03), v * (0.9 + hash01(i + 13) * 0.06));
     }
-    var n = ring.length;
-    // walls
-    for (var e = 0; e < n; e++) {
-      var p1 = ring[e], p2 = ring[(e + 1) % n];
-      pos.push(p1[0], 0, p1[1], p2[0], 0, p2[1], p2[0], h, p2[1]);
-      pos.push(p1[0], 0, p1[1], p2[0], h, p2[1], p1[0], h, p1[1]);
-      // slightly darker walls than roof for depth
-      for (var w6 = 0; w6 < 6; w6++) col.push(c.r * 0.88, c.g * 0.88, c.b * 0.9);
+
+    // holes (courtyards): CW in shape space, walls face the courtyard
+    var holesV2 = [], holeArea = 0;
+    for (var hq = 0; hq < (b.q || []).length; hq++) {
+      var hRing = b.q[hq];
+      var hv2 = toV2(hRing);
+      if (THREE.ShapeUtils.area(hv2) > 0) { hv2.reverse(); hRing = hRing.slice().reverse(); }
+      holesV2.push(hv2);
+      holeArea += ringArea(hv2);
+      pushWalls(hRing, h);
     }
-    // roof
-    var tris;
-    try { tris = THREE.ShapeUtils.triangulateShape(v2, []); } catch (err) { tris = []; }
-    for (var t = 0; t < tris.length; t++) {
-      var tr = tris[t];
-      // shape space y = -z  →  back to world z
-      pos.push(v2[tr[0]].x, h, -v2[tr[0]].y, v2[tr[2]].x, h, -v2[tr[2]].y, v2[tr[1]].x, h, -v2[tr[1]].y);
-      for (var r3 = 0; r3 < 3; r3++) col.push(c.r, c.g, c.b);
+
+    pushWalls(ring, h);
+
+    // roof — triangulate, then sanity-check the covered area; degenerate
+    // footprints (self-intersections, stray points) otherwise produce the
+    // classic "spiky roof" glitches.
+    var expected = ringArea(v2) - holeArea;
+    var all = v2.concat.apply(v2, holesV2);
+    var tris = [];
+    try { tris = THREE.ShapeUtils.triangulateShape(v2, holesV2); } catch (err) { tris = []; }
+    if (holesV2.length && (!tris.length || Math.abs(trisArea(all, tris) - expected) > expected * 0.4)) {
+      // holes confused the triangulator — retry without them
+      all = v2;
+      try { tris = THREE.ShapeUtils.triangulateShape(v2, []); } catch (err2) { tris = []; }
+      expected = ringArea(v2);
     }
+    if (!tris.length || Math.abs(trisArea(all, tris) - expected) > expected * 0.4) {
+      // last resort: centroid fan — never spikes outside the footprint area
+      all = v2.slice();
+      var cxs = 0, cys = 0;
+      for (var ci = 0; ci < v2.length; ci++) { cxs += v2[ci].x; cys += v2[ci].y; }
+      all.push(new THREE.Vector2(cxs / v2.length, cys / v2.length));
+      tris = [];
+      for (var fi = 0; fi < v2.length; fi++) tris.push([fi, (fi + 1) % v2.length, v2.length]);
+    }
+    pushRoofTris(all, tris, h);
   }
   var g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
@@ -313,6 +387,8 @@ function buildBuildings() {
 }
 var buildingMat = new THREE.MeshLambertMaterial({ vertexColors: true, color: DAY.bTint });
 var buildings = new THREE.Mesh(buildBuildings(), buildingMat);
+buildings.castShadow = true;
+buildings.receiveShadow = true;
 scene.add(buildings);
 
 // ---------- night windows + street lamps (Points) ----------
@@ -708,6 +784,7 @@ var night = false;
 function lerpColor(mat, hex) { mat.color.set(hex); }
 function toggleNight() {
   night = !night;
+  if (night && typeof setSunMode === 'function' && sunMode) setSunMode(false);
   var P = night ? NIGHT : DAY;
   scene.background.set(P.sky);
   scene.fog.color.set(P.fog);
@@ -726,6 +803,162 @@ function toggleNight() {
   toast(night ? '<b>Night mode</b> — windows are on' : '<b>Day mode</b>');
 }
 document.getElementById('btn-night').addEventListener('click', toggleNight);
+
+// ---------- sun & shade study ----------
+// Solar position (SunCalc formulas), real cast shadows, and a sun-path
+// arc for the chosen date. Time slider is Israel local time (DST
+// approximated as Apr-Sep).
+var RAD = Math.PI / 180;
+function sunPosition(date, lat, lon) {
+  var lw = -lon * RAD, phi = lat * RAD;
+  var d = date.getTime() / 86400000 - 0.5 + 2440588 - 2451545;
+  var M = RAD * (357.5291 + 0.98560028 * d);
+  var C = RAD * (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M) + 0.0003 * Math.sin(3 * M));
+  var L = M + C + RAD * 102.9372 + Math.PI;
+  var e = RAD * 23.4397;
+  var dec = Math.asin(Math.sin(e) * Math.sin(L));
+  var ra = Math.atan2(Math.sin(L) * Math.cos(e), Math.cos(L));
+  var H = RAD * (280.16 + 360.9856235 * d) - lw - ra;
+  var alt = Math.asin(Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(H));
+  var az = Math.atan2(Math.sin(H), Math.cos(H) * Math.sin(phi) - Math.tan(dec) * Math.cos(phi));
+  return { alt: alt, azN: az + Math.PI }; // azN: compass azimuth from north, clockwise
+}
+function sunDir(alt, azN) {
+  return new THREE.Vector3(Math.sin(azN) * Math.cos(alt), Math.sin(alt), -Math.cos(azN) * Math.cos(alt));
+}
+function ilDate(month, hours) {
+  var utcOff = (month >= 3 && month <= 8) ? 3 : 2; // rough Israel DST
+  var h = Math.floor(hours), m = Math.round((hours - h) * 60);
+  return new Date(Date.UTC(2026, month, 21, h - utcOff, m));
+}
+
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var sunMode = false;
+var sunGroup = new THREE.Group();
+sunGroup.visible = false;
+scene.add(sunGroup);
+
+// shadow catcher: flat surfaces are unlit, so shadows on the ground are
+// drawn onto this transparent overlay plane
+var shadowCatcher = new THREE.Mesh(
+  new THREE.PlaneGeometry(R * 3.2, R * 3.2),
+  new THREE.ShadowMaterial({ opacity: 0.32 })
+);
+shadowCatcher.rotation.x = -Math.PI / 2;
+shadowCatcher.position.y = 0.24;
+shadowCatcher.receiveShadow = true;
+shadowCatcher.visible = false;
+scene.add(shadowCatcher);
+
+var sunMarker = new THREE.Mesh(new THREE.SphereGeometry(R * 0.02, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffd254 }));
+sunGroup.add(sunMarker);
+var sunRay = new THREE.Line(
+  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)),
+  new THREE.LineBasicMaterial({ color: 0xffd254, transparent: true, opacity: 0.4 })
+);
+sunGroup.add(sunRay);
+var arcLine = null, arcMonth = -1, hourDots = null;
+
+// compass letters on the ground
+(function () {
+  var pts = [['N', 0, -1], ['E', 1, 0], ['S', 0, 1], ['W', -1, 0]];
+  for (var i = 0; i < 4; i++) {
+    var sp = makeLabel(pts[i][0], null, true);
+    sp.position.set(pts[i][1] * R * 1.18, 12, pts[i][2] * R * 1.18);
+    sp.scale.multiplyScalar(0.6);
+    sunGroup.add(sp);
+  }
+})();
+
+function rebuildArc(month) {
+  if (arcLine) { sunGroup.remove(arcLine); arcLine.geometry.dispose(); }
+  if (hourDots) { sunGroup.remove(hourDots); hourDots.geometry.dispose(); }
+  var pts = [], dots = [];
+  for (var hh = 4; hh <= 21; hh += 0.1) {
+    var p = sunPosition(ilDate(month, hh), A.meta.center.lat, A.meta.center.lon);
+    if (p.alt <= 0) continue;
+    var v = sunDir(p.alt, p.azN).multiplyScalar(R * 1.35);
+    pts.push(v.x, v.y, v.z);
+    if (Math.abs(hh - Math.round(hh)) < 0.05) dots.push(v.x, v.y, v.z);
+  }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+  arcLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xf0b429, transparent: true, opacity: 0.75 }));
+  sunGroup.add(arcLine);
+  var dg = new THREE.BufferGeometry();
+  dg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(dots), 3));
+  hourDots = new THREE.Points(dg, new THREE.PointsMaterial({ color: 0xffffff, size: R * 0.012, sizeAttenuation: true }));
+  sunGroup.add(hourDots);
+  arcMonth = month;
+}
+
+function fmtTime(hours) {
+  var h = Math.floor(hours), m = Math.round((hours - h) * 60);
+  return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+}
+
+function updateSun() {
+  var month = parseInt(document.getElementById('sun-month').value, 10);
+  var hours = parseFloat(document.getElementById('sun-time').value);
+  document.getElementById('sun-month-v').textContent = MONTHS[month] + ' 21';
+  document.getElementById('sun-time-v').textContent = fmtTime(hours);
+  if (arcMonth !== month) rebuildArc(month);
+  var p = sunPosition(ilDate(month, hours), A.meta.center.lat, A.meta.center.lon);
+  var read = document.getElementById('sun-read');
+  if (p.alt <= 0.005) {
+    read.textContent = 'Sun below the horizon · השמש מתחת לאופק';
+    sun.intensity = 0.15;
+    sun.castShadow = false;
+    sunMarker.visible = false;
+    return;
+  }
+  sunMarker.visible = true;
+  var dir = sunDir(p.alt, p.azN);
+  sun.position.copy(dir.clone().multiplyScalar(R * 2.2));
+  sun.intensity = 1.1 + 0.5 * Math.sin(p.alt);
+  sun.castShadow = true;
+  sunMarker.position.copy(dir.clone().multiplyScalar(R * 1.35));
+  var rp = sunRay.geometry.attributes.position.array;
+  rp[0] = sunMarker.position.x; rp[1] = sunMarker.position.y; rp[2] = sunMarker.position.z;
+  rp[3] = 0; rp[4] = 0; rp[5] = 0;
+  sunRay.geometry.attributes.position.needsUpdate = true;
+  read.textContent = 'Altitude ' + Math.round(p.alt / RAD) + '° · Azimuth ' + Math.round(p.azN / RAD) + '° · shadows ×' + (Math.abs(Math.tan(p.alt)) > 0.05 ? (1 / Math.tan(p.alt)).toFixed(1) : '∞') + ' height';
+}
+
+function setSunMode(on) {
+  if (on === sunMode) return;
+  sunMode = on;
+  if (on && night) toggleNight(); // sun study is a daytime tool
+  sunGroup.visible = on;
+  shadowCatcher.visible = on;
+  document.getElementById('sunpanel').classList.toggle('open', on);
+  document.getElementById('btn-sun').classList.toggle('on', on);
+  if (on) {
+    if (!sun.shadow.camera.userData.tuned) {
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.left = -R * 1.1; sun.shadow.camera.right = R * 1.1;
+      sun.shadow.camera.top = R * 1.1; sun.shadow.camera.bottom = -R * 1.1;
+      sun.shadow.camera.near = R * 0.2; sun.shadow.camera.far = R * 5;
+      sun.shadow.bias = -0.0004;
+      sun.shadow.normalBias = 1.5;
+      sun.shadow.camera.userData.tuned = true;
+      sun.shadow.camera.updateProjectionMatrix();
+    }
+    hemi.intensity = 0.55;
+    updateSun();
+    toast('<b>Sun study</b> — set month and time, shadows are true to the site');
+  } else {
+    sun.castShadow = false;
+    sun.position.set(-0.6 * R, 1.1 * R, -0.5 * R);
+    var P = night ? NIGHT : DAY;
+    sun.intensity = P.sunI;
+    hemi.intensity = P.hemiI;
+  }
+}
+document.getElementById('btn-sun').addEventListener('click', function () { setSunMode(!sunMode); });
+document.getElementById('sun-x').addEventListener('click', function () { setSunMode(false); });
+document.getElementById('sun-month').addEventListener('input', updateSun);
+document.getElementById('sun-time').addEventListener('input', updateSun);
 
 // ---------- tour ----------
 var tourActive = false, tourIdx = 0, tourTimer = null;

@@ -5,7 +5,7 @@ const path    = require("path");
 const axios           = require("axios");
 const fs              = require("fs");
 const { runAnalysis } = require("./index");
-const { buildAtlas }  = require("./atlas");
+const { getAtlasBuild } = require("./atlas");
 
 const PORT = process.env.PORT || 3111;
 
@@ -87,6 +87,19 @@ app.post("/run", async (req, res) => {
     const result = await runAnalysis(address.trim(), (progress) => {
       sendEvent("progress", progress);
     });
+    // Pre-warm the site's 3D atlas in the background so "3D View" opens
+    // instantly. Fire-and-forget: failures just mean the atlas builds on
+    // first click instead.
+    if (result.data?.site_center) {
+      getAtlasBuild({
+        site: {
+          lat: result.data.site_center.lat,
+          lon: result.data.site_center.lon,
+          radius: result.data.site_radius,
+          label: result.data.address || address.trim(),
+        },
+      }).catch((e) => console.log("[atlas] pre-warm failed:", e.message));
+    }
     // Embed SITE_DATA as a JSON constant and fire postMessage when the dashboard iframe loads.
     // </script> inside JSON values is escaped to <\/script> so the HTML parser won't close the tag early.
     const safeJson = JSON.stringify(result.data).replace(/<\/script>/gi, '<\\/script>');
@@ -108,8 +121,6 @@ app.post("/run", async (req, res) => {
 // ?rebuild=1 forces a fresh build, ?mock=1 uses the offline
 // procedural test city.
 
-const atlasBuilds = new Map(); // per-site in-flight build promises
-
 app.get("/atlas", async (req, res) => {
   const mock  = req.query.mock === "1";
   const force = req.query.rebuild === "1" || mock;
@@ -127,12 +138,8 @@ app.get("/atlas", async (req, res) => {
   }
   const allowSparse = req.query.anyway === "1";
 
-  const key = (mock ? "mock" : site ? `${lat.toFixed(4)},${lon.toFixed(4)},${site.radius}` : "default") + (allowSparse ? ",sparse" : "");
   try {
-    if (!atlasBuilds.has(key)) {
-      atlasBuilds.set(key, buildAtlas({ mock, force, site, allowSparse }).finally(() => atlasBuilds.delete(key)));
-    }
-    const result = await atlasBuilds.get(key);
+    const result = await getAtlasBuild({ mock, force, site, allowSparse });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(result.html);
   } catch (err) {

@@ -104,6 +104,7 @@ function buildAtlasQuery(lat, lon, radius, coastRadius) {
 [out:json][timeout:180];
 (
   way["building"](around:${radius},${lat},${lon});
+  relation["building"](around:${radius},${lat},${lon});
   way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|pedestrian|living_street|unclassified)$"](around:${radius},${lat},${lon});
   way["leisure"~"^(park|garden)$"](around:${radius},${lat},${lon});
   way["landuse"~"^(grass|village_green|recreation_ground)$"](around:${radius},${lat},${lon});
@@ -253,6 +254,51 @@ function kindFromTags(t) {
   return "place";
 }
 
+// Drop duplicate/near-duplicate consecutive points — they make the roof
+// triangulator emit degenerate, spiky triangles.
+function cleanRing(pts) {
+  const out = [];
+  for (const p of pts) {
+    const prev = out[out.length - 1];
+    if (prev && Math.hypot(p[0] - prev[0], p[1] - prev[1]) < 0.25) continue;
+    out.push(p);
+  }
+  while (out.length > 1 && Math.hypot(out[0][0] - out[out.length - 1][0], out[0][1] - out[out.length - 1][1]) < 0.25) out.pop();
+  return out;
+}
+
+function pointInRing([px, pz], ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, zi] = ring[i], [xj, zj] = ring[j];
+    if (zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Chain member ways of a multipolygon into closed rings.
+function chainWaysToRings(segs) {
+  const pool = segs.map((sg) => sg.slice()).filter((sg) => sg.length >= 2);
+  const rings = [];
+  const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.5;
+  while (pool.length) {
+    let chain = pool.pop();
+    let grew = true;
+    while (grew && !near(chain[0], chain[chain.length - 1])) {
+      grew = false;
+      for (let i = 0; i < pool.length; i++) {
+        const sg = pool[i];
+        if (near(chain[chain.length - 1], sg[0])) { chain = chain.concat(sg.slice(1)); pool.splice(i, 1); grew = true; break; }
+        if (near(chain[chain.length - 1], sg[sg.length - 1])) { chain = chain.concat(sg.slice(0, -1).reverse()); pool.splice(i, 1); grew = true; break; }
+        if (near(chain[0], sg[sg.length - 1])) { chain = sg.slice(0, -1).concat(chain); pool.splice(i, 1); grew = true; break; }
+        if (near(chain[0], sg[0])) { chain = sg.slice(1).reverse().concat(chain); pool.splice(i, 1); grew = true; break; }
+      }
+    }
+    if (chain.length >= 4 && near(chain[0], chain[chain.length - 1])) rings.push(chain.slice(0, -1));
+  }
+  return rings;
+}
+
 function osmToAtlasData(osm, center, radius) {
   log("info", "Converting OSM elements to atlas geometry...");
   const nodeMap = {};
@@ -282,6 +328,57 @@ function osmToAtlasData(osm, center, radius) {
     });
   }
 
+  // Shared building constructor for plain ways and multipolygon outers.
+  function addBuilding(rawRing, holes, tags, id) {
+    const ring = cleanRing(rawRing.map(([x, z]) => [q(x), q(z)]));
+    if (ring.length < 3) return;
+    const { area, cx, cz } = polygonAreaCentroid(ring);
+    if (area < 12) return; // skip sheds/noise
+    const b = { p: ring, h: q(buildingHeight(tags, id)), cx: q(cx), cz: q(cz) };
+    const cleanHoles = (holes || [])
+      .map((hr) => cleanRing(hr.map(([x, z]) => [q(x), q(z)])))
+      .filter((hr) => hr.length >= 3 && polygonAreaCentroid(hr).area >= 8);
+    if (cleanHoles.length) b.q = cleanHoles;
+    const tHeight = parseFloat(String(tags.height ?? "").replace(/[^\d.]/g, ""));
+    const tLevels = parseFloat(tags["building:levels"]);
+    if ((tHeight > 2 && tHeight < 400) || (tLevels > 0 && tLevels < 100)) heightTagged++;
+    const nm = tags["name:en"] || tags.name;
+    if (nm) {
+      b.n = nm;
+      if (tags.name && tags.name !== nm) b.nh = tags.name;
+      namedCandidates.push({ idx: buildings.length, name: nm, he: b.nh || "", kind: kindFromTags(tags), h: b.h, area, cx: b.cx, cz: b.cz });
+    }
+    buildings.push(b);
+  }
+
+  // Multipolygon building relations (courtyard blocks etc.): assemble
+  // outer rings from member ways, attach inner rings as holes, and keep
+  // the member ways out of the plain-way pass below.
+  const wayById = {};
+  for (const el of osm.elements) {
+    if (el.type === "way") wayById[el.id] = el;
+  }
+  const relationMemberWays = new Set();
+  for (const el of osm.elements) {
+    if (el.type !== "relation" || !el.tags || !el.tags.building) continue;
+    const memberSegs = { outer: [], inner: [] };
+    for (const m of el.members || []) {
+      if (m.type !== "way") continue;
+      const role = m.role === "inner" ? "inner" : "outer";
+      const w = wayById[m.ref];
+      if (!w) continue;
+      relationMemberWays.add(m.ref);
+      const coords = (w.nodes || []).map((n) => nodeMap[n]).filter(Boolean);
+      if (coords.length >= 2) memberSegs[role].push(coords);
+    }
+    const outers = chainWaysToRings(memberSegs.outer);
+    const inners = chainWaysToRings(memberSegs.inner);
+    for (const outer of outers) {
+      const holes = inners.filter((inn) => pointInRing(inn[0], outer));
+      addBuilding(outer, holes, el.tags, el.id);
+    }
+  }
+
   for (const el of osm.elements) {
     if (el.type !== "way") continue;
     const tags = el.tags || {};
@@ -289,21 +386,9 @@ function osmToAtlasData(osm, center, radius) {
     if (coords.length < 2) continue;
 
     if (tags.building) {
+      if (relationMemberWays.has(el.id)) continue; // rendered via its relation
       if (coords.length < 4) continue; // need a closed ring
-      const ring = coords.slice(0, -1).map(([x, z]) => [q(x), q(z)]);
-      const { area, cx, cz } = polygonAreaCentroid(ring);
-      if (area < 12) continue; // skip sheds/noise
-      const b = { p: ring, h: q(buildingHeight(tags, el.id)), cx: q(cx), cz: q(cz) };
-      const tHeight = parseFloat(String(tags.height ?? "").replace(/[^\d.]/g, ""));
-      const tLevels = parseFloat(tags["building:levels"]);
-      if ((tHeight > 2 && tHeight < 400) || (tLevels > 0 && tLevels < 100)) heightTagged++;
-      const nm = tags["name:en"] || tags.name;
-      if (nm) {
-        b.n = nm;
-        if (tags.name && tags.name !== nm) b.nh = tags.name;
-        namedCandidates.push({ idx: buildings.length, name: nm, he: b.nh || "", kind: kindFromTags(tags), h: b.h, area, cx: b.cx, cz: b.cz });
-      }
-      buildings.push(b);
+      addBuilding(coords.slice(0, -1), null, tags, el.id);
     } else if (tags.highway && ROAD_CLASSES[tags.highway]) {
       const cls = ROAD_CLASSES[tags.highway];
       const r = { p: coords.map(([x, z]) => [q(x), q(z)]), w: cls.w, m: cls.major };
@@ -652,7 +737,25 @@ async function buildAtlas(options = {}) {
   return { path: outPath, html, cached: false };
 }
 
-module.exports = { buildAtlas, CONFIG };
+// Shared in-flight build map: the /atlas route and the analysis
+// pre-warm both go through here, so a site is never built twice
+// concurrently and a click on "3D View" awaits the warm-up build.
+const inFlightBuilds = new Map();
+
+function atlasBuildKey({ mock = false, site = null, allowSparse = false } = {}) {
+  const base = mock ? "mock" : site ? `${site.lat.toFixed(4)},${site.lon.toFixed(4)},${site.radius}` : "default";
+  return base + (allowSparse ? ",sparse" : "");
+}
+
+function getAtlasBuild(opts = {}) {
+  const key = atlasBuildKey(opts);
+  if (!inFlightBuilds.has(key)) {
+    inFlightBuilds.set(key, buildAtlas(opts).finally(() => inFlightBuilds.delete(key)));
+  }
+  return inFlightBuilds.get(key);
+}
+
+module.exports = { buildAtlas, getAtlasBuild, CONFIG };
 
 // ---- CLI ----------------------------------------------------
 
