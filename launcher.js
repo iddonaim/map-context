@@ -125,11 +125,12 @@ app.get("/atlas", async (req, res) => {
     const label  = String(req.query.label || "").slice(0, 160) || null;
     site = { lat, lon, radius, label };
   }
+  const allowSparse = req.query.anyway === "1";
 
-  const key = mock ? "mock" : site ? `${lat.toFixed(4)},${lon.toFixed(4)},${site.radius}` : "default";
+  const key = (mock ? "mock" : site ? `${lat.toFixed(4)},${lon.toFixed(4)},${site.radius}` : "default") + (allowSparse ? ",sparse" : "");
   try {
     if (!atlasBuilds.has(key)) {
-      atlasBuilds.set(key, buildAtlas({ mock, force, site }).finally(() => atlasBuilds.delete(key)));
+      atlasBuilds.set(key, buildAtlas({ mock, force, site, allowSparse }).finally(() => atlasBuilds.delete(key)));
     }
     const result = await atlasBuilds.get(key);
     res.setHeader("Content-Type", "text/html; charset=utf-8");

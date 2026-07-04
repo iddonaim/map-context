@@ -10,11 +10,25 @@ minimap. Inspired by the "SF Tech Atlas" style of explorable city pages.
 1. **City atlas** — `/atlas` with no parameters: central Tel Aviv,
    2.2 km radius, all curated landmarks.
 2. **Site atlas** — `/atlas?lat=..&lon=..&r=..&label=..`: centered on an
-   analyzed address. This is what the dashboard's **3D View** button
-   shows: the searched site sits at the center with a red marker and a
-   red ring at the analysis radius, plus any curated landmarks that
-   happen to fall inside the area. The 3D world extends to about twice
-   the analysis radius so it doesn't end at the site boundary.
+   analyzed address, **anywhere in Israel**. This is what the dashboard's
+   **3D View** button shows: the searched site sits at the center with a
+   red marker and a red ring at the analysis radius. The 3D world extends
+   to about twice the analysis radius so it doesn't end at the site
+   boundary.
+
+   Outside central Tel Aviv the labels come from OpenStreetMap itself:
+   named buildings become landmarks (colored by type — culture, civic,
+   market…) and `place=neighbourhood/suburb` points become area labels,
+   so any reasonably mapped town gets a labeled, explorable scene. The
+   curated Tel Aviv list still applies wherever it overlaps.
+
+   **Data-sufficiency gate:** if OpenStreetMap has fewer than ~30 mapped
+   buildings around a site (`min_buildings` in `atlas.js`), the 3D view
+   shows a friendly bilingual "not enough 3D data here" message instead
+   of an empty scene, with a "show anyway" link. The atlas header always
+   shows what share of buildings have surveyed heights (the rest get
+   plausible 2–5 floor defaults), so you can judge how literally to take
+   the massing.
 
 Each site's atlas is cached separately (first build downloads its OSM
 data once; subsequent opens are instant until the server restarts or

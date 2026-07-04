@@ -103,7 +103,7 @@ canvas#scene { position: fixed; inset: 0; display: block; }
 
 const HTML_BODY = `
 <canvas id="scene"></canvas>
-<div id="loader"><div class="ring"></div><div class="t1" id="loader-t1">Building Tel Aviv…</div><div class="t2" id="loader-t2"></div></div>
+<div id="loader"><div class="ring"></div><div class="t1" id="loader-t1">Building the atlas…</div><div class="t2" id="loader-t2"></div></div>
 <div id="title"><div class="t1" id="title-t1"></div><div class="t2" id="title-t2"></div></div>
 <div id="search-wrap"><span class="mag">⌕</span><input id="search" type="text" placeholder="Search landmarks, streets, neighborhoods…" autocomplete="off"><div id="results"></div></div>
 <div id="modes"><button data-mode="orbit" class="on">Orbit</button><button data-mode="fly">Fly</button><button data-mode="walk">Walk</button></div>
@@ -781,7 +781,7 @@ document.getElementById('btn-full').addEventListener('click', function () {
   else document.documentElement.requestFullscreen();
 });
 document.getElementById('title-t1').textContent = A.meta.name + ' — ' + (A.meta.name_he || '');
-document.getElementById('title-t2').textContent = A.meta.counts.buildings.toLocaleString() + ' buildings · ' + A.meta.counts.landmarks + ' landmarks · OpenStreetMap';
+document.getElementById('title-t2').textContent = A.meta.counts.buildings.toLocaleString() + ' buildings · ' + A.meta.counts.landmarks + ' landmarks · OpenStreetMap' + (A.meta.heightPct != null ? ' · ' + A.meta.heightPct + '% surveyed heights' : '');
 document.getElementById('attrib').innerHTML = (A.meta.mock ? '<span class="mock">MOCK DATA (offline preview) · </span>' : '') + 'Data © OpenStreetMap contributors · built ' + A.meta.built_at.slice(0, 10);
 
 // ---------- minimap ----------
@@ -922,6 +922,7 @@ function animate(now) {
   }
 }
 
+document.getElementById('loader-t1').textContent = 'Building ' + A.meta.name + '…';
 document.getElementById('loader-t2').textContent = A.meta.counts.buildings.toLocaleString() + ' buildings · ' + A.roads.length.toLocaleString() + ' street segments';
 requestAnimationFrame(animate);
 setTimeout(function () { document.getElementById('loader').classList.add('hide'); }, 350);

@@ -24,6 +24,9 @@ const CONFIG = {
   output_filename: "tel-aviv-atlas.html",
   cache_dir: "./cache",
   cache_max_age_hours: 24 * 7, // reuse downloaded OSM data for a week
+  // Site atlases with fewer mapped buildings than this get a friendly
+  // "not enough 3D data here" page instead of a barren scene.
+  min_buildings: 30,
 };
 
 // ============================================================
@@ -106,6 +109,7 @@ function buildAtlasQuery(lat, lon, radius, coastRadius) {
   way["landuse"~"^(grass|village_green|recreation_ground)$"](around:${radius},${lat},${lon});
   way["natural"="beach"](around:${coastRadius},${lat},${lon});
   way["natural"="coastline"](around:${coastRadius},${lat},${lon});
+  node["place"~"^(neighbourhood|suburb|quarter|village|hamlet)$"](around:${radius},${lat},${lon});
 );
 out body;
 >;
@@ -240,6 +244,15 @@ function polygonAreaCentroid(pts) {
 
 // ---- OSM → atlas data ---------------------------------------
 
+// Map OSM tags to a landmark kind (drives beacon/label colors).
+function kindFromTags(t) {
+  if (t.amenity === "place_of_worship" || t.tourism || ["theatre", "cinema", "arts_centre", "library", "community_centre"].includes(t.amenity)) return "culture";
+  if (["townhall", "courthouse", "hospital", "university", "college", "school"].includes(t.amenity)) return "civic";
+  if (t.shop === "mall" || t.amenity === "marketplace") return "market";
+  if (t.office) return "tech";
+  return "place";
+}
+
 function osmToAtlasData(osm, center, radius) {
   log("info", "Converting OSM elements to atlas geometry...");
   const nodeMap = {};
@@ -252,6 +265,22 @@ function osmToAtlasData(osm, center, radius) {
   const parks = [];
   const beaches = [];
   const coastSegs = [];
+  const osmHoods = [];
+  const namedCandidates = [];
+  let heightTagged = 0;
+
+  for (const el of osm.elements) {
+    if (el.type !== "node" || !el.tags || !el.tags.place) continue;
+    const [x, z] = toLocal(el.lat, el.lon, center);
+    if (Math.hypot(x, z) > radius) continue;
+    const nm = el.tags["name:en"] || el.tags.name;
+    if (!nm) continue;
+    osmHoods.push({
+      name: nm,
+      he: el.tags.name && el.tags.name !== nm ? el.tags.name : "",
+      x: q(x), z: q(z),
+    });
+  }
 
   for (const el of osm.elements) {
     if (el.type !== "way") continue;
@@ -265,9 +294,15 @@ function osmToAtlasData(osm, center, radius) {
       const { area, cx, cz } = polygonAreaCentroid(ring);
       if (area < 12) continue; // skip sheds/noise
       const b = { p: ring, h: q(buildingHeight(tags, el.id)), cx: q(cx), cz: q(cz) };
+      const tHeight = parseFloat(String(tags.height ?? "").replace(/[^\d.]/g, ""));
+      const tLevels = parseFloat(tags["building:levels"]);
+      if ((tHeight > 2 && tHeight < 400) || (tLevels > 0 && tLevels < 100)) heightTagged++;
       const nm = tags["name:en"] || tags.name;
-      if (nm) b.n = nm;
-      if (tags.name && tags["name:en"] && tags.name !== tags["name:en"]) b.nh = tags.name;
+      if (nm) {
+        b.n = nm;
+        if (tags.name && tags.name !== nm) b.nh = tags.name;
+        namedCandidates.push({ idx: buildings.length, name: nm, he: b.nh || "", kind: kindFromTags(tags), h: b.h, area, cx: b.cx, cz: b.cz });
+      }
       buildings.push(b);
     } else if (tags.highway && ROAD_CLASSES[tags.highway]) {
       const cls = ROAD_CLASSES[tags.highway];
@@ -289,8 +324,8 @@ function osmToAtlasData(osm, center, radius) {
     }
   }
 
-  log("ok", `Parsed: ${buildings.length} buildings, ${roads.length} road segments, ${parks.length} green areas, ${beaches.length} beach polys, ${coastSegs.length} coastline segments`);
-  return { buildings, roads, parks, beaches, coastSegs };
+  log("ok", `Parsed: ${buildings.length} buildings (${heightTagged} with surveyed heights), ${roads.length} road segments, ${parks.length} green areas, ${beaches.length} beach polys, ${coastSegs.length} coastline segments, ${osmHoods.length} area labels`);
+  return { buildings, roads, parks, beaches, coastSegs, osmHoods, namedCandidates, heightTagged };
 }
 
 // ---- Coastline → sea polygon --------------------------------
@@ -372,11 +407,35 @@ function attachLandmarks(data, center, keepRadius) {
     }
     lms.push(out);
   }
+  // OSM-named buildings fill in as landmarks wherever the curated
+  // Tel Aviv list doesn't reach — this is what makes the atlas work
+  // for any Israeli town, not just central Tel Aviv.
+  const candidates = (data.namedCandidates || [])
+    .sort((a, b) => (b.h * Math.sqrt(b.area)) - (a.h * Math.sqrt(a.area)));
+  const MAX_LANDMARKS = 28;
+  for (const c of candidates) {
+    if (lms.length >= MAX_LANDMARKS) break;
+    if (lms.some((l) => Math.hypot(l.x - c.cx, l.z - c.cz) < 40)) continue; // near an existing landmark
+    data.buildings[c.idx].lm = `osm-${c.idx}`;
+    lms.push({
+      id: `osm-${c.idx}`, name: c.name, he: c.he, kind: c.kind,
+      blurb: "", x: c.cx, z: c.cz, h: data.buildings[c.idx].h,
+    });
+  }
+  delete data.namedCandidates;
+
   data.landmarks = lms;
-  data.hoods = NEIGHBORHOODS.map((n) => {
+  const hoods = NEIGHBORHOODS.map((n) => {
     const [x, z] = toLocal(n.lat, n.lon, center);
     return { name: n.name, he: n.he, x: q(x), z: q(z) };
   }).filter((n) => Math.hypot(n.x, n.z) <= keepRadius * 1.05);
+  for (const h of data.osmHoods || []) {
+    if (hoods.length >= 12) break;
+    if (hoods.some((e) => e.name === h.name || Math.hypot(e.x - h.x, e.z - h.z) < 300)) continue;
+    hoods.push(h);
+  }
+  delete data.osmHoods;
+  data.hoods = hoods;
 }
 
 // Marks the analyzed address at the scene origin (site-focused atlases).
@@ -404,6 +463,25 @@ function shortLabel(label) {
   if (!label) return null;
   const parts = String(label).split(",").map((s) => s.trim()).filter(Boolean);
   return parts.slice(0, 2).join(", ").slice(0, 80) || null;
+}
+
+// ---- "Not enough data" page ---------------------------------
+// Served instead of the atlas when OSM has too few mapped buildings
+// around a site to make a meaningful 3D scene.
+
+function insufficientPage(label, count, radius, anywayURL) {
+  const esc = (t) => String(t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<!DOCTYPE html>
+<html lang="he"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D — אין מספיק נתונים</title></head>
+<body style="margin:0;background:#0b0e14;color:#e8eaf0;font-family:-apple-system,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px;box-sizing:border-box">
+<div style="max-width:460px">
+<div style="font-size:40px;margin-bottom:14px">🏗️</div>
+<h2 style="margin:0 0 10px;font-size:19px;direction:rtl">אין מספיק נתוני תלת־ממד באזור הזה</h2>
+<p style="margin:0 0 6px;font-size:13.5px;color:#aab2c8;direction:rtl">ב־OpenStreetMap ממופים רק ${count} מבנים ברדיוס של כ־${radius} מ׳ מ${esc(label) || "הכתובת"} — פחות מדי לסצנה תלת־ממדית שימושית.</p>
+<p style="margin:0 0 18px;font-size:12px;color:#8b93a8">OpenStreetMap has only ${count} mapped buildings within ~${radius} m of this address. The 2D analysis still works — 3D needs denser mapping here.</p>
+<a style="color:#f0b429;font-size:13px" href="${anywayURL}">הצג בכל זאת · Show the sparse 3D anyway</a>
+</div></body></html>`;
 }
 
 // ---- Mock city (offline testing) ----------------------------
@@ -491,7 +569,7 @@ function mockData(radius) {
 // ---- Main build ---------------------------------------------
 
 async function buildAtlas(options = {}) {
-  const { mock = false, onProgress = null, force = false, site = null } = options;
+  const { mock = false, onProgress = null, force = false, site = null, allowSparse = false } = options;
 
   // Site-focused mode: center on an analyzed address instead of the
   // city-wide default. Fetch a wider area than the analysis radius so
@@ -504,9 +582,13 @@ async function buildAtlas(options = {}) {
   const key = site
     ? `${center.lat.toFixed(4)}_${center.lon.toFixed(4)}_${fetchRadius}`
     : "default";
+  // "Show anyway" builds get their own file so a sparse scene built on
+  // request never bypasses the sufficiency gate for later visitors.
   const outPath = path.join(
     CONFIG.output_dir,
-    key === "default" ? CONFIG.output_filename : `atlas-${key.replace(/[^\w.-]/g, "")}.html`
+    key === "default"
+      ? CONFIG.output_filename
+      : `atlas-${key.replace(/[^\w.-]/g, "")}${allowSparse ? "-sparse" : ""}.html`
   );
 
   if (!force && !mock && fs.existsSync(outPath)) {
@@ -524,6 +606,22 @@ async function buildAtlas(options = {}) {
     if (onProgress) onProgress({ label: "ממיר גיאומטריה...", percent: 55 });
     data = osmToAtlasData(osm, center, fetchRadius);
     attachLandmarks(data, center, fetchRadius);
+
+    // Data-sufficiency gate: a site with almost no mapped buildings
+    // gets an explanation page instead of an empty 3D scene.
+    if (site && !allowSparse && data.buildings.length < CONFIG.min_buildings) {
+      log("warn", `Only ${data.buildings.length} buildings here — serving "not enough data" page`);
+      const qs = new URLSearchParams({
+        lat: String(site.lat), lon: String(site.lon), r: String(site.radius),
+        ...(site.label ? { label: site.label } : {}), anyway: "1",
+      }).toString();
+      return {
+        insufficient: true,
+        path: null,
+        cached: false,
+        html: insufficientPage(label, data.buildings.length, fetchRadius, `/atlas?${qs}`),
+      };
+    }
   }
   if (site) attachSiteMarker(data, label);
 
@@ -535,11 +633,13 @@ async function buildAtlas(options = {}) {
     center,
     radius: fetchRadius,
     siteRadius: site ? site.radius : null,
+    heightPct: mock ? null : Math.round((100 * (data.heightTagged || 0)) / Math.max(1, data.buildings.length)),
     mock,
     built_at: new Date().toISOString(),
     counts: { buildings: data.buildings.length, roads: data.roads.length, landmarks: data.landmarks.length },
   };
 
+  delete data.heightTagged;
   if (onProgress) onProgress({ label: "בונה עמוד תלת-ממד...", percent: 80 });
   log("info", "Rendering atlas HTML...");
   const html = renderAtlasHTML(data);
