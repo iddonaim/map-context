@@ -5,6 +5,21 @@ browser — real buildings, streets, the coastline and the Mediterranean,
 with 25 curated landmarks, day/night modes, search, a guided tour and a
 minimap. Inspired by the "SF Tech Atlas" style of explorable city pages.
 
+## Two flavors
+
+1. **City atlas** — `/atlas` with no parameters: central Tel Aviv,
+   2.2 km radius, all curated landmarks.
+2. **Site atlas** — `/atlas?lat=..&lon=..&r=..&label=..`: centered on an
+   analyzed address. This is what the dashboard's **3D View** button
+   shows: the searched site sits at the center with a red marker and a
+   red ring at the analysis radius, plus any curated landmarks that
+   happen to fall inside the area. The 3D world extends to about twice
+   the analysis radius so it doesn't end at the site boundary.
+
+Each site's atlas is cached separately (first build downloads its OSM
+data once; subsequent opens are instant until the server restarts or
+the weekly cache expires).
+
 ## How to open it
 
 - **On the deployed app (Railway):** open `/atlas` (there is also a link

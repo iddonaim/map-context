@@ -13,11 +13,12 @@
 
 function renderAtlasHTML(data) {
   const safeJson = JSON.stringify(data).replace(/<\/script>/gi, "<\\/script>");
+  const safeTitle = String(data.meta.name).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   return (
     "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n" +
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1\">\n" +
-    "<title>" + data.meta.name + " — 3D</title>\n" +
+    "<title>" + safeTitle + " — 3D</title>\n" +
     "<style>\n" + CSS + "\n</style>\n</head>\n<body>\n" +
     HTML_BODY +
     "\n<script>\nwindow.ATLAS = " + safeJson + ";\n</script>\n" +
@@ -142,7 +143,7 @@ var NIGHT = {
   park: 0x14211a, roadMajor: 0x232733, roadMinor: 0x1b1f2a, bTint: 0x39415c,
   hemiSky: 0x1c2740, hemiGround: 0x0c0f16, hemiI: 0.5, sunI: 0.22, sunColor: 0xa8c0ff
 };
-var KIND_COLORS = { tower: 0xf0b429, tech: 0x39c6b8, culture: 0xe86f9e, civic: 0x7fa8f0, market: 0xf07f45, place: 0xf0b429, park: 0x74c476, beach: 0xf0d998 };
+var KIND_COLORS = { site: 0xff5d5d, tower: 0xf0b429, tech: 0x39c6b8, culture: 0xe86f9e, civic: 0x7fa8f0, market: 0xf07f45, place: 0xf0b429, park: 0x74c476, beach: 0xf0d998 };
 
 // ---------- renderer / scene ----------
 var canvas = document.getElementById('scene');
@@ -223,6 +224,15 @@ var parkMat = null;
 if (A.parks && A.parks.length) {
   var pm = flatShapeMesh(A.parks, DAY.park, 0.14);
   if (pm) { parkMat = pm.material; scene.add(pm); }
+}
+
+// analysis-radius ring around the site (site-focused atlases only)
+if (A.meta.siteRadius) {
+  var ringGeo = new THREE.RingGeometry(A.meta.siteRadius - 2.5, A.meta.siteRadius + 2.5, 128);
+  ringGeo.rotateX(-Math.PI / 2);
+  var ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xff5d5d, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }));
+  ring.position.y = 0.3;
+  scene.add(ring);
 }
 
 // ---------- roads (flat ribbons) ----------
@@ -431,11 +441,13 @@ for (var bi = 0; bi < A.landmarks.length; bi++) {
 scene.add(beaconGroup);
 
 var hoodGroup = new THREE.Group();
+var hoodScale = Math.max(0.35, Math.min(1, R / 2200)); // shrink area labels in small site atlases
 for (var hi = 0; hi < (A.hoods || []).length; hi++) {
   var hd = A.hoods[hi];
   var hl = makeLabel(hd.name, hd.he, true);
-  hl.position.set(hd.x, 120, hd.z);
+  hl.position.set(hd.x, Math.max(60, 120 * hoodScale), hd.z);
   hl.material.opacity = 0.55;
+  hl.scale.set(hl.userData.baseW * hoodScale, hl.userData.baseH * hoodScale, 1);
   hoodGroup.add(hl);
 }
 scene.add(hoodGroup);
