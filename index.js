@@ -1329,8 +1329,6 @@ makeToggle('toggle-stat-area', layerStatArea);`
 <title>Context Mapper — ${address}</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
-<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
-<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"><\/script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; margin: 0; }
@@ -1459,6 +1457,7 @@ makeToggle('toggle-stat-area', layerStatArea);`
 
   #map-wrapper { flex: 1; order: 1; position: relative; min-height: 0; }
   #map-2d, #map-3d { position: absolute; inset: 0; }
+  @keyframes atlas-spin { to { transform: rotate(360deg); } }
   .leaflet-container { background: #e8e8e4; }
 
   .view-toggle-btn {
@@ -1683,8 +1682,6 @@ ${cbsDemographicsHTML}
     <div id="map-wrapper">
       <div id="map-2d"></div>
       <div id="map-3d"></div>
-      <div id="map3d-diag" style="display:none; position:absolute; bottom:10px; left:10px; z-index:50; background:rgba(0,0,0,0.75); color:#0f0; font:11px monospace; padding:6px 10px; border-radius:4px; max-width:90%; white-space:pre-wrap;"></div>
-      <div id="map3d-error" style="display:none; position:absolute; top:10px; left:10px; right:10px; z-index:50; background:#c0392b; color:#fff; font:12px sans-serif; padding:10px 14px; border-radius:6px; white-space:pre-wrap;"></div>
     </div>
   </div><!-- /panel-map -->
 
@@ -1777,8 +1774,9 @@ const DATA_LIGHTRAIL    = ${lightRailJSON};
 const DATA_TRAIN        = ${trainJSON};
 const DATA_BUSLINES     = ${busLinesJSON};
 const DATA_INSTITUTIONS = ${institutionsJSON};
-const SITE_CENTER = { lat: ${lat}, lon: ${lon} };
-const SITE_RADIUS = ${radius_meters};
+const SITE_CENTER  = { lat: ${lat}, lon: ${lon} };
+const SITE_RADIUS  = ${radius_meters};
+const SITE_ADDRESS = ${JSON.stringify(address)};
 
 // ── Map init ─────────────────────────────────────────────
 const map = L.map('map-2d', { zoomControl: true, attributionControl: true })
@@ -2004,151 +2002,31 @@ document.getElementById('exportSVG').addEventListener('click', () => {
   a.click();
   URL.revokeObjectURL(a.href);
 });
-// ── 2D / 3D toggle ────────────────────────────────────────────
-var map3d = null;
+// ── 2D / 3D toggle ────────────────────────────────────────────────────────────
+// The 3D view is the site atlas: an explorable Three.js city built
+// from OSM around this address, served by the same app at /atlas.
+// The relative URL resolves against the launcher origin, including
+// when this dashboard is rendered inside nested iframes (srcdoc
+// documents inherit the embedding page's base URL).
+var atlasFrame = null;
 var is3D  = false;
 
-var LAYER_3D_MAP = {
-  'toggle-buildings': 'buildings-3d',
-  'toggle-streets':   'streets-3d',
-  'toggle-trees':     'trees-3d',
-};
+function initAtlas3D() {
+  var wrap = document.getElementById('map-3d');
+  var note = document.createElement('div');
+  note.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#0b0e14;color:#aab2c8;font-size:13px;z-index:1;text-align:center;padding:20px;';
+  note.innerHTML = '<div style="width:34px;height:34px;border:3px solid #2a3350;border-top-color:#f0b429;border-radius:50%;animation:atlas-spin .9s linear infinite"></div>' +
+    '<div>בונה אטלס תלת־ממדי לאתר…</div>' +
+    '<div style="font-size:11px;color:#666e82">First 3D build for a new address can take up to a minute — afterwards it loads instantly.</div>';
+  wrap.appendChild(note);
 
-function sync3DVisibility() {
-  if (!map3d) return;
-  Object.keys(LAYER_3D_MAP).forEach(function(toggleId) {
-    var layerId = LAYER_3D_MAP[toggleId];
-    var el = document.getElementById(toggleId);
-    if (!el || !map3d.getLayer(layerId)) return;
-    var on = el.querySelector('.toggle-switch').classList.contains('on');
-    map3d.setLayoutProperty(layerId, 'visibility', on ? 'visible' : 'none');
-  });
-}
-
-// Add 3D sync listeners to existing toggles (after Leaflet toggles have run)
-['toggle-buildings', 'toggle-streets', 'toggle-trees'].forEach(function(id) {
-  var el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener('click', function() {
-    if (!map3d || !map3d.isStyleLoaded()) return;
-    var on = el.querySelector('.toggle-switch').classList.contains('on');
-    var layerId = LAYER_3D_MAP[id];
-    if (layerId && map3d.getLayer(layerId)) {
-      map3d.setLayoutProperty(layerId, 'visibility', on ? 'visible' : 'none');
-    }
-  });
-});
-
-function showMap3DError(err) {
-  var box = document.getElementById('map3d-error');
-  if (!box) return;
-  box.textContent = '3D view failed to load: ' + (err && err.message ? err.message : String(err));
-  box.style.display = 'block';
-}
-
-function updateMap3DDiagnostics() {
-  var box = document.getElementById('map3d-diag');
-  if (!box) return;
-  var total = (DATA_BUILDINGS.features || []).length;
-  var rendered = 'n/a';
-  try {
-    if (map3d && map3d.isStyleLoaded() && map3d.getLayer('buildings-3d')) {
-      rendered = map3d.queryRenderedFeatures({ layers: ['buildings-3d'] }).length;
-    }
-  } catch (e) { /* style/canvas not ready yet */ }
-  box.textContent = 'Buildings: ' + rendered + ' rendered / ' + total + ' total';
-  box.style.display = 'block';
-}
-
-function initMap3D() {
- try {
-  map3d = new maplibregl.Map({
-    container: 'map-3d',
-    style: {
-      version: 8,
-      sources: {
-        'carto': {
-          type: 'raster',
-          tiles: [
-            'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-            'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-            'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
-          ],
-          tileSize: 256,
-          attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-          maxzoom: 19,
-        },
-        'buildings-src':  { type: 'geojson', data: DATA_BUILDINGS },
-        'streets-src':    { type: 'geojson', data: DATA_STREETS },
-        'trees-src':      { type: 'geojson', data: DATA_TREES },
-      },
-      layers: [
-        { id: 'background',    type: 'background', paint: { 'background-color': '#e8e8e4' } },
-        { id: 'carto-raster',  type: 'raster',     source: 'carto' },
-        {
-          id: 'buildings-3d',
-          type: 'fill-extrusion',
-          source: 'buildings-src',
-          paint: {
-            'fill-extrusion-color':   '#4a90d9',
-            'fill-extrusion-opacity': 0.75,
-            'fill-extrusion-height':  ['coalesce', ['get', 'height'], 9.6],
-            'fill-extrusion-base':    0,
-          },
-        },
-        {
-          id: 'streets-3d',
-          type: 'line',
-          source: 'streets-src',
-          paint: { 'line-color': '#555', 'line-width': 2 },
-        },
-        {
-          id: 'trees-3d',
-          type: 'circle',
-          source: 'trees-src',
-          paint: { 'circle-color': '#2d8a4e', 'circle-radius': 4, 'circle-opacity': 0.7 },
-        },
-      ],
-    },
-    center:  [SITE_CENTER.lon, SITE_CENTER.lat],
-    zoom:    16,
-    pitch:   60,
-    bearing: 0,
-  });
-
-  map3d.on('load', function() {
-    sync3DVisibility();
-    updateMap3DDiagnostics();
-    map3d.on('moveend', updateMap3DDiagnostics);
-  });
-  map3d.on('error', function(e) {
-    showMap3DError(e && e.error ? e.error : e);
-  });
-
-  map3d.on('click', 'buildings-3d', function(e) {
-    if (!e.features || !e.features.length) return;
-    var p = e.features[0].properties;
-    var h = p.height || 9.6;
-    var floors = Math.round(h / 3.2);
-    var srcMap = { attr: 'GIS attribute', floors: 'GIS attribute', osm: 'OSM levels', 'default': 'default' };
-    var srcLabel = srcMap[p.heightSource] || (p.heightSource || 'default');
-    new maplibregl.Popup({ closeButton: true, closeOnClick: true })
-      .setLngLat(e.lngLat)
-      .setHTML(
-        '<div style="font-size:12px;line-height:1.6;min-width:140px">' +
-        '<div style="font-weight:700;margin-bottom:4px">Building</div>' +
-        '<div><b>' + h.toFixed(1) + ' m</b> height</div>' +
-        '<div>' + floors + ' floor' + (floors !== 1 ? 's' : '') + '</div>' +
-        '<div style="color:#888;font-size:10px;margin-top:4px">Source: ' + srcLabel + '</div>' +
-        '</div>'
-      )
-      .addTo(map3d);
-  });
-  map3d.on('mouseenter', 'buildings-3d', function() { map3d.getCanvas().style.cursor = 'pointer'; });
-  map3d.on('mouseleave', 'buildings-3d', function() { map3d.getCanvas().style.cursor = ''; });
- } catch (err) {
-   showMap3DError(err);
- }
+  atlasFrame = document.createElement('iframe');
+  atlasFrame.title = '3D site atlas';
+  atlasFrame.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;z-index:2;';
+  atlasFrame.src = '/atlas?lat=' + SITE_CENTER.lat + '&lon=' + SITE_CENTER.lon +
+                   '&r=' + SITE_RADIUS + '&label=' + encodeURIComponent(SITE_ADDRESS);
+  atlasFrame.addEventListener('load', function() { note.style.display = 'none'; });
+  wrap.appendChild(atlasFrame);
 }
 
 function toggleView() {
@@ -2167,11 +2045,7 @@ function toggleView() {
     objBtn.style.display    = 'block';
     exportNote.textContent  = 'OBJ output: closed meshes per building (walls + roof), streets as polylines, trees as line stubs. Metric coordinates (1 unit = 1m). Companion .mtl file with named materials.';
     btn.textContent         = '2D View';
-    if (!map3d) {
-      initMap3D();
-    } else {
-      map3d.resize();
-    }
+    if (!atlasFrame) initAtlas3D();
   } else {
     map3dEl.style.display   = 'none';
     map2dEl.style.display   = 'block';
@@ -2595,7 +2469,7 @@ async function runAnalysis(address, onProgress) {
   return { html, data };
 }
 
-module.exports = { runAnalysis };
+module.exports = { runAnalysis, buildHTML };
 
 // ---- CLI entry point ---------------------------------------
 

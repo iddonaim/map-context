@@ -146,8 +146,7 @@ async function fetchOverpass(query, onProgress) {
   throw new Error("All Overpass endpoints failed. Check network/quota.");
 }
 
-function cachedFetchOverpass(query, onProgress) {
-  const cacheFile = path.join(CONFIG.cache_dir, "atlas-osm.json");
+function cachedFetchOverpass(query, cacheFile, onProgress) {
   try {
     if (fs.existsSync(cacheFile)) {
       const ageH = (Date.now() - fs.statSync(cacheFile).mtimeMs) / 36e5;
@@ -346,10 +345,11 @@ function buildSeaPolygon(coastSegs, extent) {
 
 // ---- Landmark snapping --------------------------------------
 
-function attachLandmarks(data, center) {
+function attachLandmarks(data, center, keepRadius) {
   const lms = [];
   for (const lm of LANDMARKS) {
     const [x, z] = toLocal(lm.lat, lm.lon, center);
+    if (Math.hypot(x, z) > keepRadius * 1.05) continue; // outside this atlas
     const out = {
       id: lm.id, name: lm.name, he: lm.he, kind: lm.kind,
       blurb: lm.blurb, x: q(x), z: q(z), h: lm.fallback_h,
@@ -376,7 +376,34 @@ function attachLandmarks(data, center) {
   data.hoods = NEIGHBORHOODS.map((n) => {
     const [x, z] = toLocal(n.lat, n.lon, center);
     return { name: n.name, he: n.he, x: q(x), z: q(z) };
-  });
+  }).filter((n) => Math.hypot(n.x, n.z) <= keepRadius * 1.05);
+}
+
+// Marks the analyzed address at the scene origin (site-focused atlases).
+function attachSiteMarker(data, label) {
+  const marker = {
+    id: "site", name: label || "Site", he: "האתר הנבחר", kind: "site",
+    blurb: "The address this analysis is centered on.", x: 0, z: 0, h: 0,
+  };
+  let best = -1, bestD = 60;
+  for (let i = 0; i < data.buildings.length; i++) {
+    const b = data.buildings[i];
+    const d = Math.hypot(b.cx, b.cz);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (best >= 0) {
+    const b = data.buildings[best];
+    marker.x = b.cx; marker.z = b.cz; marker.h = b.h;
+    b.lm = "site";
+  }
+  data.landmarks.unshift(marker);
+}
+
+// Shorten a full Nominatim display name to something label-sized.
+function shortLabel(label) {
+  if (!label) return null;
+  const parts = String(label).split(",").map((s) => s.trim()).filter(Boolean);
+  return parts.slice(0, 2).join(", ").slice(0, 80) || null;
 }
 
 // ---- Mock city (offline testing) ----------------------------
@@ -464,33 +491,50 @@ function mockData(radius) {
 // ---- Main build ---------------------------------------------
 
 async function buildAtlas(options = {}) {
-  const { mock = false, onProgress = null, force = false } = options;
-  const outPath = path.join(CONFIG.output_dir, CONFIG.output_filename);
+  const { mock = false, onProgress = null, force = false, site = null } = options;
+
+  // Site-focused mode: center on an analyzed address instead of the
+  // city-wide default. Fetch a wider area than the analysis radius so
+  // the 3D world doesn't end at the site boundary.
+  const center = site ? { lat: site.lat, lon: site.lon } : CONFIG.center;
+  const fetchRadius = site
+    ? Math.min(Math.max(Math.round(site.radius * 2), 600), 2400)
+    : CONFIG.radius_meters;
+  const label = site ? shortLabel(site.label) : null;
+  const key = site
+    ? `${center.lat.toFixed(4)}_${center.lon.toFixed(4)}_${fetchRadius}`
+    : "default";
+  const outPath = path.join(
+    CONFIG.output_dir,
+    key === "default" ? CONFIG.output_filename : `atlas-${key.replace(/[^\w.-]/g, "")}.html`
+  );
 
   if (!force && !mock && fs.existsSync(outPath)) {
     log("ok", `Atlas already built: ${outPath} (use force to rebuild)`);
     return { path: outPath, html: fs.readFileSync(outPath, "utf8"), cached: true };
   }
 
-  const center = CONFIG.center;
   let data;
   if (mock) {
-    data = mockData(CONFIG.radius_meters);
+    data = mockData(fetchRadius);
   } else {
-    const query = buildAtlasQuery(center.lat, center.lon, CONFIG.radius_meters, CONFIG.radius_meters + CONFIG.coast_extra_meters);
-    const osm = await cachedFetchOverpass(query, onProgress);
+    const query = buildAtlasQuery(center.lat, center.lon, fetchRadius, fetchRadius + CONFIG.coast_extra_meters);
+    const cacheFile = path.join(CONFIG.cache_dir, `atlas-osm-${key.replace(/[^\w.-]/g, "")}.json`);
+    const osm = await cachedFetchOverpass(query, cacheFile, onProgress);
     if (onProgress) onProgress({ label: "ממיר גיאומטריה...", percent: 55 });
-    data = osmToAtlasData(osm, center, CONFIG.radius_meters);
-    attachLandmarks(data, center);
+    data = osmToAtlasData(osm, center, fetchRadius);
+    attachLandmarks(data, center, fetchRadius);
   }
+  if (site) attachSiteMarker(data, label);
 
-  data.sea = buildSeaPolygon(data.coastSegs, CONFIG.radius_meters);
+  data.sea = buildSeaPolygon(data.coastSegs, fetchRadius);
   delete data.coastSegs;
   data.meta = {
-    name: CONFIG.name,
-    name_he: CONFIG.name_he,
+    name: site ? (label || "Site Atlas") : CONFIG.name,
+    name_he: site ? "אטלס אתר" : CONFIG.name_he,
     center,
-    radius: CONFIG.radius_meters,
+    radius: fetchRadius,
+    siteRadius: site ? site.radius : null,
     mock,
     built_at: new Date().toISOString(),
     counts: { buildings: data.buildings.length, roads: data.roads.length, landmarks: data.landmarks.length },

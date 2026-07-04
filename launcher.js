@@ -100,26 +100,44 @@ app.post("/run", async (req, res) => {
   }
 });
 
-// ---- Endpoint: Tel Aviv 3D Atlas ------------------------------
-// Generates on first request (downloads OSM data once, then cached
-// on disk). ?rebuild=1 forces a fresh build, ?mock=1 uses the
-// offline procedural test city.
+// ---- Endpoint: 3D Atlas ---------------------------------------
+// Without parameters: the city-wide Tel Aviv atlas. With
+// ?lat=..&lon=..&r=..&label=.. : an atlas centered on an analyzed
+// site (used by the dashboard's 3D view). Generates on first
+// request (downloads OSM data once, then cached on disk).
+// ?rebuild=1 forces a fresh build, ?mock=1 uses the offline
+// procedural test city.
 
-let atlasBuilding = null; // in-flight build promise (avoid duplicate fetches)
+const atlasBuilds = new Map(); // per-site in-flight build promises
 
 app.get("/atlas", async (req, res) => {
   const mock  = req.query.mock === "1";
   const force = req.query.rebuild === "1" || mock;
-  try {
-    if (!atlasBuilding) {
-      atlasBuilding = buildAtlas({ mock, force }).finally(() => { atlasBuilding = null; });
+
+  let site = null;
+  const lat = parseFloat(req.query.lat);
+  const lon = parseFloat(req.query.lon);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    if (lat < 29 || lat > 34 || lon < 33.5 || lon > 36) {
+      return res.status(400).send("lat/lon outside supported bounds");
     }
-    const result = await atlasBuilding;
+    const radius = Math.min(Math.max(parseInt(req.query.r, 10) || 400, 100), 3000);
+    const label  = String(req.query.label || "").slice(0, 160) || null;
+    site = { lat, lon, radius, label };
+  }
+
+  const key = mock ? "mock" : site ? `${lat.toFixed(4)},${lon.toFixed(4)},${site.radius}` : "default";
+  try {
+    if (!atlasBuilds.has(key)) {
+      atlasBuilds.set(key, buildAtlas({ mock, force, site }).finally(() => atlasBuilds.delete(key)));
+    }
+    const result = await atlasBuilds.get(key);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(result.html);
   } catch (err) {
+    const retryQS = new URLSearchParams({ ...req.query, rebuild: "1" }).toString();
     res.status(500).setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(`<body style="font-family:sans-serif;background:#0b0e14;color:#e8eaf0;display:flex;align-items:center;justify-content:center;height:100vh"><div><h2>Atlas build failed</h2><p>${(err.message || "unknown error").replace(/</g, "&lt;")}</p><p><a style="color:#f0b429" href="/atlas?rebuild=1">Try again</a></p></div></body>`);
+    res.send(`<body style="font-family:sans-serif;background:#0b0e14;color:#e8eaf0;display:flex;align-items:center;justify-content:center;height:100vh"><div><h2>Atlas build failed</h2><p>${(err.message || "unknown error").replace(/</g, "&lt;")}</p><p><a style="color:#f0b429" href="/atlas?${retryQS}">Try again</a></p></div></body>`);
   }
 });
 
