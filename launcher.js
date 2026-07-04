@@ -3,7 +3,9 @@
 const express = require("express");
 const path    = require("path");
 const axios           = require("axios");
+const fs              = require("fs");
 const { runAnalysis } = require("./index");
+const { buildAtlas }  = require("./atlas");
 
 const PORT = process.env.PORT || 3111;
 
@@ -96,6 +98,38 @@ app.post("/run", async (req, res) => {
     sendEvent("error", { message: err.message || "Analysis failed" });
     res.end();
   }
+});
+
+// ---- Endpoint: Tel Aviv 3D Atlas ------------------------------
+// Generates on first request (downloads OSM data once, then cached
+// on disk). ?rebuild=1 forces a fresh build, ?mock=1 uses the
+// offline procedural test city.
+
+let atlasBuilding = null; // in-flight build promise (avoid duplicate fetches)
+
+app.get("/atlas", async (req, res) => {
+  const mock  = req.query.mock === "1";
+  const force = req.query.rebuild === "1" || mock;
+  try {
+    if (!atlasBuilding) {
+      atlasBuilding = buildAtlas({ mock, force }).finally(() => { atlasBuilding = null; });
+    }
+    const result = await atlasBuilding;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(result.html);
+  } catch (err) {
+    res.status(500).setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(`<body style="font-family:sans-serif;background:#0b0e14;color:#e8eaf0;display:flex;align-items:center;justify-content:center;height:100vh"><div><h2>Atlas build failed</h2><p>${(err.message || "unknown error").replace(/</g, "&lt;")}</p><p><a style="color:#f0b429" href="/atlas?rebuild=1">Try again</a></p></div></body>`);
+  }
+});
+
+// Serve three.js from node_modules so the atlas page works without a CDN
+app.get("/vendor/three.module.js", (_req, res) => {
+  const p = path.join(__dirname, "node_modules", "three", "build", "three.module.js");
+  if (!fs.existsSync(p)) return res.status(404).send("three.js not installed — run npm install");
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.send(fs.readFileSync(p, "utf8"));
 });
 
 // ---- Main page -----------------------------------------------
@@ -298,6 +332,22 @@ const HTML = `<!DOCTYPE html>
   button#run-btn.show { display: block; }
   button#run-btn:disabled { background: #aaa; cursor: default; }
 
+  .atlas-link {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 28px;
+    padding: 14px 16px;
+    border: 1.5px dashed #ccc;
+    border-radius: 10px;
+    text-decoration: none;
+    color: #333;
+    font-size: 14px;
+    transition: border-color .15s, background .15s;
+  }
+  .atlas-link:hover { border-color: #888; background: #fafafa; }
+  .atlas-link .atlas-icon { font-size: 22px; }
+  .atlas-link small { color: #888; direction: ltr; display: inline-block; }
 </style>
 </head>
 <body>
@@ -334,6 +384,11 @@ const HTML = `<!DOCTYPE html>
     <br>
     <button class="retry-btn" id="retry-btn">נסה שנית</button>
   </div>
+
+  <a class="atlas-link" href="/atlas" target="_blank" rel="noopener">
+    <span class="atlas-icon">🏙</span>
+    <span><b>אטלס תל אביב</b> — סיור תלת־ממדי במרכז העיר<br><small>Explorable 3D Tel Aviv · buildings, landmarks, day &amp; night</small></span>
+  </a>
 </div>
 
 <script>
