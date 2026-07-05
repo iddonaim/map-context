@@ -295,13 +295,15 @@ function buildBuildings() {
       // slightly darker walls than roof for depth
       for (var w6 = 0; w6 < 6; w6++) col.push(c.r * 0.88, c.g * 0.88, c.b * 0.9);
     }
-    // roof
+    // roof — keep the triangulation's own vertex order: a CCW shape-space
+    // triangle maps to an upward (+y) world normal under (x, h, -y). The old
+    // code swapped two vertices, flipping every roof normal downward, so the
+    // single-sided building material culled all roofs when seen from above.
     var tris;
     try { tris = THREE.ShapeUtils.triangulateShape(v2, []); } catch (err) { tris = []; }
     for (var t = 0; t < tris.length; t++) {
       var tr = tris[t];
-      // shape space y = -z  →  back to world z
-      pos.push(v2[tr[0]].x, h, -v2[tr[0]].y, v2[tr[2]].x, h, -v2[tr[2]].y, v2[tr[1]].x, h, -v2[tr[1]].y);
+      pos.push(v2[tr[0]].x, h, -v2[tr[0]].y, v2[tr[1]].x, h, -v2[tr[1]].y, v2[tr[2]].x, h, -v2[tr[2]].y);
       for (var r3 = 0; r3 < 3; r3++) col.push(c.r, c.g, c.b);
     }
   }

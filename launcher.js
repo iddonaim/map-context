@@ -349,23 +349,6 @@ const HTML = `<!DOCTYPE html>
   button#run-btn:hover { background: #333; }
   button#run-btn.show { display: block; }
   button#run-btn:disabled { background: #aaa; cursor: default; }
-
-  .atlas-link {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-top: 28px;
-    padding: 14px 16px;
-    border: 1.5px dashed #ccc;
-    border-radius: 10px;
-    text-decoration: none;
-    color: #333;
-    font-size: 14px;
-    transition: border-color .15s, background .15s;
-  }
-  .atlas-link:hover { border-color: #888; background: #fafafa; }
-  .atlas-link .atlas-icon { font-size: 22px; }
-  .atlas-link small { color: #888; direction: ltr; display: inline-block; }
 </style>
 </head>
 <body>
@@ -403,10 +386,6 @@ const HTML = `<!DOCTYPE html>
     <button class="retry-btn" id="retry-btn">נסה שנית</button>
   </div>
 
-  <a class="atlas-link" href="/atlas" target="_blank" rel="noopener">
-    <span class="atlas-icon">🏙</span>
-    <span><b>אטלס תל אביב</b> — סיור תלת־ממדי במרכז העיר<br><small>Explorable 3D Tel Aviv · buildings, landmarks, day &amp; night</small></span>
-  </a>
 </div>
 
 <script>
