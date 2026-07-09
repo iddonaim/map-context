@@ -1,6 +1,19 @@
+# Dependencies
 node_modules/
-.DS_Store
-.claude/
+
+# Runtime data (regenerated on every run)
 cache/
 output/
 site_analysis.html
+
+# Local environment / secrets (none used today, but keep them out just in case)
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor clutter
+.DS_Store
+.claude/
