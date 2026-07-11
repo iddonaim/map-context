@@ -89,6 +89,18 @@ canvas#scene { position: fixed; inset: 0; display: block; }
 #tools button:hover { border-color: rgba(240,180,41,.6); }
 #tools button.on { background: #f0b429; color: #14171f; }
 
+/* Sun study panel */
+#sunpanel { position: fixed; top: 58px; right: 62px; width: 248px; background: rgba(16,20,32,.92); border: 1px solid rgba(255,255,255,.14); border-radius: 14px; padding: 12px 14px; z-index: 25; display: none; backdrop-filter: blur(10px); }
+#sunpanel.open { display: block; }
+#sunpanel .sp-title { font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: #f0b429; margin-bottom: 10px; }
+#sunpanel .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+#sunpanel .lab { font-size: 12px; width: 52px; flex-shrink: 0; color: #e8eaf0; font-variant-numeric: tabular-nums; }
+#sunpanel input[type=range] { flex: 1; accent-color: #f0b429; }
+#sunpanel .meta { font-size: 11px; color: #8b93a8; line-height: 1.5; margin-top: 2px; }
+#sunpanel .presets { display: flex; gap: 6px; margin-top: 8px; }
+#sunpanel .presets button { flex: 1; padding: 4px 0; font-size: 11px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); color: #aab2c8; cursor: pointer; }
+#sunpanel .presets button:hover { border-color: rgba(240,180,41,.6); color: #e8eaf0; }
+
 /* Toast */
 #toast { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); padding: 8px 18px; border-radius: 16px; background: rgba(16,20,32,.9); border: 1px solid rgba(255,255,255,.14); font-size: 12.5px; z-index: 30; opacity: 0; transition: opacity .35s; pointer-events: none; backdrop-filter: blur(8px); }
 #toast.show { opacity: 1; }
@@ -130,10 +142,18 @@ const HTML_BODY = `
 <div id="modes"><button data-mode="orbit" class="on">Orbit</button><button data-mode="fly">Fly</button><button data-mode="walk">Walk</button></div>
 <div id="tools">
   <button id="btn-night" title="Day / night (N)">☾</button>
+  <button id="btn-sun" title="Sun & shadow study (S)">☀</button>
   <button id="btn-tour" title="Landmark tour (T)">▶</button>
   <button id="btn-reset" title="Reset view (R)">⌂</button>
   <button id="btn-quality" title="Graphics quality (shadows on/off)" class="on">✦</button>
   <button id="btn-full" title="Fullscreen">⛶</button>
+</div>
+<div id="sunpanel">
+  <div class="sp-title">Sun &amp; shadow study</div>
+  <div class="row"><span class="lab" id="sun-date">Jun 21</span><input id="sun-month" type="range" min="0" max="11" step="1" value="5"></div>
+  <div class="row"><span class="lab" id="sun-time">13:00</span><input id="sun-hour" type="range" min="4.5" max="20.5" step="0.1" value="13"></div>
+  <div class="meta" id="sun-meta"></div>
+  <div class="presets"><button data-m="11">Dec 21</button><button data-m="2">Mar 21</button><button data-m="5">Jun 21</button></div>
 </div>
 <div id="toast"></div>
 <div id="card"><button class="x" id="card-x">✕</button><span class="kind" id="card-kind"></span><h2 id="card-name"></h2><div class="he" id="card-he"></div><p id="card-blurb"></p><div class="meta" id="card-meta"></div></div>
@@ -178,8 +198,12 @@ var LERP = { sunI: [2.6, 0.85], fillI: [0.5, 0.2], hemiI: [0.95, 0.55], exposure
 var KIND_COLORS = { site: 0xff5d5d, tower: 0xf0b429, tech: 0x39c6b8, culture: 0xe86f9e, civic: 0x7fa8f0, market: 0xf07f45, place: 0xf0b429, park: 0x74c476, beach: 0xf0d998 };
 
 // world-space light directions (scene → light)
-var SUN_DIR = new THREE.Vector3(-0.45, 0.62, 0.42).normalize();   // afternoon sun over the sea (SW)
+var SUN_DIR = new THREE.Vector3(-0.45, 0.62, 0.42).normalize();   // default: pleasant afternoon sun over the sea (SW)
 var MOON_DIR = new THREE.Vector3(0.35, 0.55, -0.5).normalize();
+// the sun-study panel points this at the real computed sun position
+var dayLightDir = SUN_DIR.clone();
+var WARM_SUN = new THREE.Color(0xffa04e);
+var sunWarmth = 0; // 0..1, rises toward sunrise/sunset for golden-hour light
 
 // shared shader uniforms
 var uNight = { value: 0 };
@@ -892,7 +916,8 @@ canvas.addEventListener('touchmove', function (e) {
 window.addEventListener('keydown', function (e) {
   if (e.target.tagName === 'INPUT') return;
   keys[e.code] = true;
-  if (e.code === 'KeyN') toggleNight();
+  if (e.code === 'KeyN') { closeSunStudy(); toggleNight(); }
+  if (e.code === 'KeyS') sunStudy.active ? closeSunStudy() : openSunStudy();
   if (e.code === 'KeyT') tourActive ? stopTour(true) : startTour();
   if (e.code === 'KeyR') resetView();
   if (e.code === 'Digit1') setMode('orbit');
@@ -1061,9 +1086,9 @@ function applyEnvironment(t) {
   uNight.value = t;
   scene.fog.color.copy(PAIR.fog[0]).lerp(PAIR.fog[1], t);
   scene.background.copy(scene.fog.color);
-  envLightDir.copy(SUN_DIR).lerp(MOON_DIR, t).normalize();
-  sun.color.copy(PAIR.sunColor[0]).lerp(PAIR.sunColor[1], t);
-  sun.intensity = LERP.sunI[0] + (LERP.sunI[1] - LERP.sunI[0]) * t;
+  envLightDir.copy(dayLightDir).lerp(MOON_DIR, t).normalize();
+  sun.color.copy(PAIR.sunColor[0]).lerp(WARM_SUN, sunWarmth * (1 - t)).lerp(PAIR.sunColor[1], t);
+  sun.intensity = (LERP.sunI[0] + (LERP.sunI[1] - LERP.sunI[0]) * t) * (1 - 0.3 * sunWarmth * (1 - t));
   fill.color.copy(PAIR.fillColor[0]).lerp(PAIR.fillColor[1], t);
   fill.intensity = LERP.fillI[0] + (LERP.fillI[1] - LERP.fillI[0]) * t;
   hemi.color.copy(PAIR.hemiSky[0]).lerp(PAIR.hemiSky[1], t);
@@ -1089,7 +1114,90 @@ function toggleNight() {
   document.getElementById('btn-night').classList.toggle('on', night);
   toast(night ? '<b>Night mode</b> — windows are on' : '<b>Day mode</b>');
 }
-document.getElementById('btn-night').addEventListener('click', toggleNight);
+document.getElementById('btn-night').addEventListener('click', function () { closeSunStudy(); toggleNight(); });
+
+// ---------- sun & shadow study ----------
+// Real solar geometry for the atlas' own coordinates: pick a month and a
+// time of day, and the scene sun (and its shadows) moves to where the sun
+// really is. Uses the 21st of each month, Israel clock time (IST/IDT).
+var _now = new Date();
+var sunStudy = { active: false, month: _now.getMonth(), hour: Math.min(19, Math.max(6, _now.getHours() + _now.getMinutes() / 60)) };
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var DAYS_BEFORE = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+function solarPosition(month, hour) {
+  var lat = A.meta.center.lat, lon = A.meta.center.lon;
+  var n = DAYS_BEFORE[month] + 21;
+  var decl = 0.4093 * Math.sin(2 * Math.PI * (284 + n) / 365);
+  var B = 2 * Math.PI * (n - 81) / 364;
+  var eot = (9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B)) / 60;
+  var tz = month >= 3 && month <= 9 ? 3 : 2; // Israel daylight saving, approx.
+  var offset = lon / 15 - tz + eot;           // clock time → solar time
+  var H = (hour + offset - 12) * Math.PI / 12;
+  var phi = lat * Math.PI / 180;
+  var el = Math.asin(Math.sin(phi) * Math.sin(decl) + Math.cos(phi) * Math.cos(decl) * Math.cos(H));
+  var az = Math.atan2(Math.sin(H), Math.cos(H) * Math.sin(phi) - Math.tan(decl) * Math.cos(phi)) + Math.PI;
+  var cosH0 = -Math.tan(phi) * Math.tan(decl);
+  var H0 = Math.acos(Math.max(-1, Math.min(1, cosH0))) * 12 / Math.PI;
+  return { el: el, az: az, rise: 12 - H0 - offset, set: 12 + H0 - offset };
+}
+function fmtTime(h) {
+  h = (h + 24) % 24;
+  var hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+  if (mm === 60) { hh += 1; mm = 0; }
+  return hh + ':' + (mm < 10 ? '0' : '') + mm;
+}
+function applySunStudy() {
+  var sp = solarPosition(sunStudy.month, sunStudy.hour);
+  var elDeg = sp.el * 180 / Math.PI;
+  // blend to night as the sun drops: full day above +6°, full night below -3°
+  var t = Math.max(0, Math.min(1, (6 - elDeg) / 9));
+  sunWarmth = Math.max(0, Math.min(1, 1 - elDeg / 25));
+  uSunDir.value.set(Math.sin(sp.az) * Math.cos(sp.el), Math.sin(sp.el), -Math.cos(sp.az) * Math.cos(sp.el));
+  // the shadow-casting light keeps a minimum elevation so shadows stay finite
+  var elC = Math.max(sp.el, 0.05);
+  dayLightDir.set(Math.sin(sp.az) * Math.cos(elC), Math.sin(elC), -Math.cos(sp.az) * Math.cos(elC));
+  nightTarget = t;
+  applyEnvironment(t);
+  night = t > 0.6;
+  document.getElementById('btn-night').classList.toggle('on', night);
+  document.getElementById('sun-date').textContent = MONTHS[sunStudy.month] + ' 21';
+  document.getElementById('sun-time').textContent = fmtTime(sunStudy.hour);
+  document.getElementById('sun-meta').innerHTML = (elDeg > 0
+    ? 'Sun <b>' + Math.round(elDeg) + '&deg;</b> above horizon &middot; azimuth ' + Math.round(sp.az * 180 / Math.PI) + '&deg;'
+    : 'Sun below the horizon') +
+    '<br>Sunrise ' + fmtTime(sp.rise) + ' &middot; sunset ' + fmtTime(sp.set);
+}
+function openSunStudy() {
+  if (sunStudy.active) return;
+  sunStudy.active = true;
+  stopTour();
+  document.getElementById('sunpanel').classList.add('open');
+  document.getElementById('btn-sun').classList.add('on');
+  document.getElementById('sun-month').value = sunStudy.month;
+  document.getElementById('sun-hour').value = sunStudy.hour;
+  if (quality === 'low') toast('Tip: shadows are off — press <b>✦</b> to see them in the study');
+  applySunStudy();
+}
+function closeSunStudy() {
+  if (!sunStudy.active) return;
+  sunStudy.active = false;
+  document.getElementById('sunpanel').classList.remove('open');
+  document.getElementById('btn-sun').classList.remove('on');
+  sunWarmth = 0;
+  dayLightDir.copy(SUN_DIR);
+  uSunDir.value.copy(SUN_DIR);
+  nightTarget = night ? 1 : 0;
+  applyEnvironment(nightTarget);
+}
+document.getElementById('btn-sun').addEventListener('click', function () { sunStudy.active ? closeSunStudy() : openSunStudy(); });
+document.getElementById('sun-month').addEventListener('input', function () { sunStudy.month = parseInt(this.value, 10); applySunStudy(); });
+document.getElementById('sun-hour').addEventListener('input', function () { sunStudy.hour = parseFloat(this.value); applySunStudy(); });
+var presetBtns = document.querySelectorAll('#sunpanel .presets button');
+for (var pb = 0; pb < presetBtns.length; pb++) presetBtns[pb].addEventListener('click', function () {
+  sunStudy.month = parseInt(this.dataset.m, 10);
+  document.getElementById('sun-month').value = sunStudy.month;
+  applySunStudy();
+});
 
 // ---------- graphics quality ----------
 var quality = 'high';
@@ -1129,7 +1237,8 @@ window.__atlasProbe = function (cx, cy) {
   };
 };
 window.__atlas = {
-  setNight: function (v) { nightTarget = v ? 1 : 0; night = !!v; applyEnvironment(nightTarget); document.getElementById('btn-night').classList.toggle('on', night); },
+  setNight: function (v) { closeSunStudy(); nightTarget = v ? 1 : 0; night = !!v; applyEnvironment(nightTarget); document.getElementById('btn-night').classList.toggle('on', night); },
+  setSun: function (m, h) { openSunStudy(); sunStudy.month = m; sunStudy.hour = h; document.getElementById('sun-month').value = m; document.getElementById('sun-hour').value = h; applySunStudy(); },
   setQuality: setQuality
 };
 

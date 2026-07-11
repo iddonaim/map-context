@@ -48,6 +48,7 @@ The result is written to `output/tel-aviv-atlas.html`.
 | WASD | Move (Fly and Walk modes; Space/C = up/down in Fly) |
 | Double-click | Fly to that spot |
 | **N** | Day / night (smooth transition; windows light up, street lamps glow) |
+| **S** or ☀ | Sun & shadow study — pick a month and time of day, the sun and all shadows move to where the sun really is |
 | **T** or ▶ | Guided landmark tour |
 | **R** or ⌂ | Reset view |
 | ✦ | Graphics quality (turns real-time shadows on/off; also drops automatically on slow devices) |
@@ -85,6 +86,12 @@ textures or models:
 
 - **Sun & shadows** — real-time soft shadows with filmic tone mapping;
   the shadow area follows the camera so shadows stay crisp up close.
+- **Sun & shadow study (☀ / S)** — a panel with month and time-of-day
+  sliders. The sun is placed by real solar geometry for the atlas'
+  actual coordinates (Israel clock time, sunrise/sunset shown), so you
+  can check e.g. what shades a site on a winter morning. Golden-hour
+  light near sunrise/sunset, and the scene fades to night when the sun
+  sets. Presets for the solstices and equinox.
 - **Sky** — a shader sky dome: blue gradient with a sun by day; stars,
   a moon and a warm city glow on the horizon at night. Pressing **N**
   fades smoothly between them.
