@@ -390,6 +390,19 @@ const HTML = `<!DOCTYPE html>
 
 <script>
 (function () {
+  // Relay "analysis-complete" upward. The dashboard lives in a nested srcdoc
+  // iframe, so its window.parent is THIS page — without this relay the message
+  // never reaches an embedding app (e.g. Cuboid Studio's Map tab). Only this
+  // one known message type is forwarded, and only from our own dashboard
+  // iframe (srcdoc inherits this page's origin). The payload is public map
+  // analysis data; '*' matches the dashboard's own targetOrigin.
+  window.addEventListener('message', function (ev) {
+    if (window.parent === window) return;
+    if (ev.origin !== window.location.origin) return;
+    if (!ev.data || ev.data.type !== 'analysis-complete') return;
+    window.parent.postMessage(ev.data, '*');
+  });
+
   var input        = document.getElementById('addr-input');
   var dropdown     = document.getElementById('dropdown');
   var spinner      = document.getElementById('spinner');
