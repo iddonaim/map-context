@@ -329,8 +329,9 @@ function buildSeaPolygon(coastSegs, extent) {
   // Close the loop far to the west, extending the coastline straight
   // beyond the data so the sea never visibly "ends" on screen:
   // [NW corner] → coast (N→S, extended both ways) → [SW corner]
-  const west = -extent * 2.2;
-  const ext = extent * 3;
+  // reach past the fog horizon so the sea never visibly ends
+  const west = -extent * 8;
+  const ext = extent * 8;
   const first = coast[0];
   const last = coast[coast.length - 1];
   const poly = [

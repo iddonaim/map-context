@@ -47,9 +47,11 @@ The result is written to `output/tel-aviv-atlas.html`.
 | **Orbit / Fly / Walk** buttons (or 1 / 2 / 3) | Camera modes |
 | WASD | Move (Fly and Walk modes; Space/C = up/down in Fly) |
 | Double-click | Fly to that spot |
-| **N** | Day / night (night turns on windows + street lights) |
+| **N** | Day / night (smooth transition; windows light up, street lamps glow) |
+| **S** or ☀ | Sun & shadow study — pick a month and time of day, the sun and all shadows move to where the sun really is |
 | **T** or ▶ | Guided landmark tour |
 | **R** or ⌂ | Reset view |
+| ✦ | Graphics quality (turns real-time shadows on/off; also drops automatically on slow devices) |
 | Search bar | Landmarks, neighborhoods, streets (English or Hebrew) |
 | Minimap click | Jump there |
 
@@ -77,6 +79,33 @@ Edit the `CONFIG` block at the top of `atlas.js`:
 
 The page itself (colors, UI, camera behavior) is `atlas-template.js`.
 
+## Graphics
+
+Everything is generated procedurally in the browser — no downloaded
+textures or models:
+
+- **Sun & shadows** — real-time soft shadows with filmic tone mapping;
+  the shadow area follows the camera so shadows stay crisp up close.
+- **Sun & shadow study (☀ / S)** — a panel with month and time-of-day
+  sliders. The sun is placed by real solar geometry for the atlas'
+  actual coordinates (Israel clock time, sunrise/sunset shown), so you
+  can check e.g. what shades a site on a winter morning. Golden-hour
+  light near sunrise/sunset, and the scene fades to night when the sun
+  sets. Presets for the solstices and equinox.
+- **Sky** — a shader sky dome: blue gradient with a sun by day; stars,
+  a moon and a warm city glow on the horizon at night. Pressing **N**
+  fades smoothly between them.
+- **Building facades** — every building gets a procedural window grid
+  (glass insets by day; at night a random half of the windows glow).
+- **Sea** — animated ripples with a sun/moon glitter path.
+- **Parks** get low-poly trees; major streets get glowing lamps at
+  night; in Walk/Fly mode a small light travels with you after dark.
+
+If the frame rate stays low for a few seconds, shadows and resolution
+are reduced automatically (a toast appears; ✦ turns them back on).
+You can also pin the quality with `/atlas?graphics=high` or
+`?graphics=low`.
+
 ## Technical notes
 
 - Three.js is served locally from `node_modules` at
@@ -84,6 +113,7 @@ The page itself (colors, UI, camera behavior) is `atlas-template.js`.
   directly from disk.
 - All buildings are merged into a single mesh (one draw call), so the
   page stays smooth on ordinary hardware even with tens of thousands of
-  buildings. Night windows and street lights are point clouds.
+  buildings. The window grids are drawn inside the building material's
+  shader, so they add no geometry; street lights are a point cloud.
 - Everything is baked into one self-contained HTML file
   (`output/tel-aviv-atlas.html`) — it can be shared or hosted as-is.
