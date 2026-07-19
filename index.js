@@ -16,6 +16,8 @@ const CONFIG = {
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const { clampRadius } = require("./lib/siteParams");
+const { resultCacheKey, readCachedResult, writeCachedResult } = require("./lib/resultCache");
 
 // ---- Logging -----------------------------------------------
 
@@ -2390,13 +2392,36 @@ document.querySelector('.tab[data-panel="panel-plans"]').addEventListener('click
 
 // ---- Core analysis pipeline --------------------------------
 
-async function runAnalysis(address, onProgress) {
+async function runAnalysis(address, onProgress, options = {}) {
   const cb = typeof onProgress === "function" ? onProgress : null;
 
-  if (cb) cb({ step: "geocoding", label: "Locating address", percent: 5 });
-  const center = await geocode(address);
+  // Radius is a parameter now (clamped like /atlas); CONFIG only supplies
+  // the default. Client-provided coordinates take precedence over
+  // re-geocoding the address string — a geocoder round-trip can move a
+  // picked suggestion to a different point (docs/AUDIT_2026-07-12.md).
+  const radius = clampRadius(options.radius ?? CONFIG.radius_meters);
 
-  const radius   = CONFIG.radius_meters;
+  let center;
+  if (options.center && Number.isFinite(options.center.lat) && Number.isFinite(options.center.lon)) {
+    center = { lat: options.center.lat, lon: options.center.lon };
+    log("info", `Using client-provided center ${center.lat.toFixed(6)}, ${center.lon.toFixed(6)} (skipping geocode)`);
+    if (cb) cb({ step: "geocoding", label: "Locating address", percent: 5 });
+  } else {
+    if (cb) cb({ step: "geocoding", label: "Locating address", percent: 5 });
+    center = await geocode(address);
+  }
+
+  // Serve a recent identical run (same rounded center + radius) from the
+  // disk cache — a fresh run re-fetches every live layer and takes minutes.
+  const resultsDir = path.resolve(path.join(CONFIG.cache_dir ?? "./cache", "_results"));
+  const cacheKey   = resultCacheKey(center.lat, center.lon, radius);
+  const cached     = readCachedResult(resultsDir, cacheKey);
+  if (cached) {
+    log("ok", `Result cache hit: ${cacheKey}`);
+    if (cb) cb({ step: "done", label: "Loaded from cache", percent: 100 });
+    return cached;
+  }
+
   const slug     = address.toLowerCase().replace(/[\s,]+/g, "-").replace(/-+/g, "-");
   const outDir   = path.resolve(CONFIG.output_dir  ?? "./output");
   const cacheDir = path.resolve(path.join(CONFIG.cache_dir ?? "./cache", slug));
@@ -2444,7 +2469,7 @@ async function runAnalysis(address, onProgress) {
   }
 
   if (cb) cb({ step: "compiling", label: "Compiling dashboard", percent: 95 });
-  const runConfig = { ...CONFIG, address };
+  const runConfig = { ...CONFIG, address, radius_meters: radius };
   const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData);
 
   const data = {
@@ -2464,6 +2489,9 @@ async function runAnalysis(address, onProgress) {
     demographics: cbsData  ?? null,
     taba:         tabaData ?? null,
   };
+
+  // Cache only successful runs (any fatal layer failure throws before this).
+  writeCachedResult(resultsDir, cacheKey, { html, data });
 
   if (cb) cb({ step: "done", label: "Done", percent: 100 });
   return { html, data };
