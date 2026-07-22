@@ -6,6 +6,7 @@ const axios           = require("axios");
 const fs              = require("fs");
 const { runAnalysis } = require("./index");
 const { buildAtlas }  = require("./atlas");
+const { parseSiteParams } = require("./lib/siteParams");
 
 const PORT = process.env.PORT || 3111;
 
@@ -19,13 +20,20 @@ app.post("/analyze", async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  const { address } = req.body || {};
+  const { address, lat, lon, radius } = req.body || {};
   if (!address || typeof address !== "string" || !address.trim()) {
     return res.status(400).json({ error: "address is required" });
   }
 
   try {
-    const result = await runAnalysis(address.trim());
+    // When the client supplies valid in-bounds coordinates, use them as the
+    // analysis center instead of re-geocoding the address string (a geocoder
+    // round-trip can resolve a picked suggestion to a different point).
+    const site = parseSiteParams({ lat, lon, address, r: radius });
+    const result = await runAnalysis(address.trim(), null, {
+      center: site ? { lat: site.lat, lon: site.lon } : null,
+      radius: site ? site.radius : radius,
+    });
     res.json(result);
   } catch (err) {
     const isGeocode = err.message && err.message.startsWith("No geocoding result");
@@ -64,11 +72,14 @@ app.get("/search", async (req, res) => {
 // ---- Endpoint: run analysis, stream progress via SSE --------
 
 app.post("/run", async (req, res) => {
-  const { address } = req.body;
+  const { address, lat, lon, radius } = req.body;
   if (!address) {
     res.setHeader("Content-Type", "application/json");
     return res.status(400).json({ status: "error", message: "address required" });
   }
+
+  // Honor client-picked coordinates and radius when valid (see /analyze).
+  const site = parseSiteParams({ lat, lon, address, r: radius });
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -86,6 +97,9 @@ app.post("/run", async (req, res) => {
   try {
     const result = await runAnalysis(address.trim(), (progress) => {
       sendEvent("progress", progress);
+    }, {
+      center: site ? { lat: site.lat, lon: site.lon } : null,
+      radius: site ? site.radius : radius,
     });
     // Embed SITE_DATA as a JSON constant and fire postMessage when the dashboard iframe loads.
     // </script> inside JSON values is escaped to <\/script> so the HTML parser won't close the tag early.
@@ -151,21 +165,36 @@ app.get("/vendor/three.module.js", (_req, res) => {
 });
 
 // ---- Main page -----------------------------------------------
+// Without query params: the address picker. With valid
+// ?lat=..&lon=..&address=..&r=.. (same validation as /atlas): the page
+// boots straight into the analysis for that site — used by embedding apps
+// (Cuboid Studio's Analysis tab) to restore a previously analyzed site.
+// Invalid or out-of-bounds params fall back to the plain picker.
 
-app.get("/", (_req, res) => {
+app.get("/", (req, res) => {
+  const site = parseSiteParams(req.query);
+  // JSON is embedded inside a <script>; escape "<" so an address containing
+  // "</script>" can't break out of the tag.
+  const bootJson = JSON.stringify(site).replace(/</g, "\\u003c");
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(HTML);
+  res.send(HTML.replace("__BOOT_SITE__", bootJson));
 });
 
 // ---- Start ---------------------------------------------------
+// Only listen (and pop a browser) when run directly — `npm start` /
+// Railway. Tests require this file to get the app without side effects.
 
-const server = app.listen(PORT, () => {
-  console.log(`\n╔══════════════════════════════════════╗`);
-  console.log(`║     CONTEXT MAPPER — Address Picker  ║`);
-  console.log(`╚══════════════════════════════════════╝`);
-  console.log(`\n  http://localhost:${PORT}\n`);
-  import("open").then(m => m.default(`http://localhost:${PORT}`)).catch(() => {});
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`\n╔══════════════════════════════════════╗`);
+    console.log(`║     CONTEXT MAPPER — Address Picker  ║`);
+    console.log(`╚══════════════════════════════════════╝`);
+    console.log(`\n  http://localhost:${PORT}\n`);
+    import("open").then(m => m.default(`http://localhost:${PORT}`)).catch(() => {});
+  });
+}
+
+module.exports = { app };
 
 // ---- HTML ----------------------------------------------------
 
@@ -389,6 +418,10 @@ const HTML = `<!DOCTYPE html>
 </div>
 
 <script>
+// Injected by the server: {lat, lon, radius, address} when the page was
+// opened with valid site query params, null for the plain picker.
+var BOOT_SITE = __BOOT_SITE__;
+
 (function () {
   // Relay "analysis-complete" upward. The dashboard lives in a nested srcdoc
   // iframe, so its window.parent is THIS page — without this relay the message
@@ -422,6 +455,7 @@ const HTML = `<!DOCTYPE html>
   var selectedAddress = null;
   var selectedLat     = null;
   var selectedLon     = null;
+  var selectedRadius  = null;
 
   // ---- Autocomplete ----------------------------------------
 
@@ -519,7 +553,10 @@ const HTML = `<!DOCTYPE html>
     ].join(';');
     backBtn.addEventListener('mouseover',  function () { backBtn.style.background = '#333'; });
     backBtn.addEventListener('mouseout',   function () { backBtn.style.background = '#111'; });
-    backBtn.addEventListener('click', function () { window.location.reload(); });
+    // Navigate to a clean "/" — never reload. When the page was booted via
+    // query params, a reload would re-trigger the auto-run instead of
+    // returning to the picker.
+    backBtn.addEventListener('click', function () { window.location.href = '/'; });
 
     var frame = document.createElement('iframe');
     frame.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9998';
@@ -552,7 +589,7 @@ const HTML = `<!DOCTYPE html>
     fetch('/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address: selectedAddress, lat: selectedLat, lon: selectedLon }),
+      body: JSON.stringify({ address: selectedAddress, lat: selectedLat, lon: selectedLon, radius: selectedRadius }),
     }).then(function (response) {
       if (!response.ok || !response.body) {
         return response.json().then(function (d) {
@@ -604,6 +641,28 @@ const HTML = `<!DOCTYPE html>
     }).catch(function (err) {
       showError(err.message || 'שגיאת תקשורת');
     });
+  }
+
+  // ---- Param boot ------------------------------------------
+  // When the server injected a site (valid ?lat&lon&address&r), skip the
+  // picker and start the analysis immediately with the same SSE progress
+  // UI. The resulting dashboard fires the analysis-complete postMessage
+  // exactly like a manual run, so an embedding app stays in sync.
+
+  if (BOOT_SITE) {
+    selectedAddress = BOOT_SITE.address;
+    selectedLat     = BOOT_SITE.lat;
+    selectedLon     = BOOT_SITE.lon;
+    selectedRadius  = BOOT_SITE.radius;
+
+    input.value = selectedAddress;
+    confirmAddr.textContent = selectedAddress;
+    confirmCad.innerHTML =
+      '<span style="color:#888;font-size:12px">' +
+      selectedLat.toFixed(6) + ', ' + selectedLon.toFixed(6) +
+      '</span>';
+    confirmCard.classList.add('show');
+    runAnalysis();
   }
 })();
 </script>
