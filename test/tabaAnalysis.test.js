@@ -237,3 +237,25 @@ test("extractRightsFromTakanon degrades gracefully on a non-PDF file", async () 
   assert.strictEqual(out.confidence, "low");
   assert.ok(out.note);
 });
+
+// ── Unit: on-demand document store (lib/tabaDocs) ────────────
+
+const tabaDocs = require("../lib/tabaDocs");
+
+test("ensurePlanDoc rejects traversal-ish names and unknown files", async () => {
+  assert.strictEqual(await tabaDocs.ensurePlanDoc("../evil", "takanon.pdf"), null);
+  assert.strictEqual(await tabaDocs.ensurePlanDoc("plan/../..", "takanon.pdf"), null);
+  assert.strictEqual(await tabaDocs.ensurePlanDoc("ok-plan", "etc-passwd"), null);
+});
+
+test("ensurePlanDoc serves an existing file and nulls on missing sources", async () => {
+  const { docsDir } = makeTmpDirs();
+  const planDir = path.join(docsDir, "P1");
+  fs.mkdirSync(planDir, { recursive: true });
+  fs.writeFileSync(path.join(planDir, "tasrit.pdf"), "%PDF fake");
+
+  const hit = await tabaDocs.ensurePlanDoc("P1", "tasrit.pdf", { docsDir });
+  assert.strictEqual(hit, path.join(planDir, "tasrit.pdf"));
+  // No sources.json → cannot download the missing one
+  assert.strictEqual(await tabaDocs.ensurePlanDoc("P1", "takanon.pdf", { docsDir }), null);
+});
