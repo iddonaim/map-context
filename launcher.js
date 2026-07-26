@@ -7,6 +7,7 @@ const fs              = require("fs");
 const { runAnalysis, TABA_DOCS_DIR } = require("./index");
 const { buildAtlas }  = require("./atlas");
 const { parseSiteParams } = require("./lib/siteParams");
+const { analyzePlan, withGovernsSitePoint } = require("./lib/tabaAnalysis");
 
 const PORT = process.env.PORT || 3111;
 
@@ -16,6 +17,33 @@ app.use(express.json());
 // Plan documents downloaded by the TABA phase — the dashboard's document
 // links (/taba-docs/<plan>/<file>) resolve here.
 app.use("/taba-docs", express.static(TABA_DOCS_DIR));
+
+// ---- Endpoint: per-plan document analysis (lazy) -------------
+// Parses the plan's downloaded documents (mmg.zip shapefiles, takanon PDF)
+// into structured land-use + rights data. Deliberately NOT part of
+// runAnalysis: first request parses and caches (plan facts are
+// address-independent), later requests are instant. ?lat&lon adds a
+// computed governsSitePoint for that site point.
+
+const analysisRuns = new Map(); // in-flight dedupe, keyed by plan number
+
+app.get("/taba-analysis/:plan", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const plan = String(req.params.plan || "").trim().slice(0, 80);
+  if (!plan) return res.status(400).json({ error: "plan number required" });
+
+  try {
+    if (!analysisRuns.has(plan)) {
+      analysisRuns.set(plan, analyzePlan(plan).finally(() => analysisRuns.delete(plan)));
+    }
+    const record = await analysisRuns.get(plan);
+    const lat = parseFloat(req.query.lat);
+    const lon = parseFloat(req.query.lon);
+    res.json(withGovernsSitePoint(record, lat, lon));
+  } catch (err) {
+    res.status(500).json({ error: err.message || "analysis failed" });
+  }
+});
 
 // ---- Endpoint: run analysis as a service --------------------
 

@@ -1,6 +1,17 @@
 # TABA Document Analysis — Scope (2026-07-26)
 
-> Status: **proposal, not started.** Companion to `AUDIT_2026-07-12.md`.
+> Status: **P0–P3 implemented 2026-07-26** (`lib/tabaAnalysis.js`,
+> `lib/takanonRights.js`, `GET /taba-analysis/:plan`, TABA-tab UI).
+> P0 was adapted: government endpoints were unreachable from the dev
+> sandbox, so instead of a live-plan fixture corpus, the shapefile path is
+> tested against generated spec-correct binaries
+> (`test/fixtures/buildMmgZip.js`) and the heuristics carry a **live
+> calibration list**: (1) real mmg.zip layer names/attribute schemas per
+> plan era, (2) Xplan layer ids + plan-number field names, (3) takanon
+> Table-5 header vocabulary across producers. Run one analysis on a real
+> address, then check `layersFound`/`notes` in
+> `cache/taba-analysis/*.json` to calibrate.
+> Companion to `AUDIT_2026-07-12.md`.
 > Context: since PR #19 the pipeline fetches the plan list, real plan
 > boundaries (via Meirim), and downloads plan documents (תקנון / תשריט /
 > ממ"ג) to `cache/taba-docs/` — but **nothing ever opens them**. The

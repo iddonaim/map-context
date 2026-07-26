@@ -687,7 +687,9 @@ async function tryDownloadFile(url, magic) {
 // Plan documents live in one shared root (plan numbers are unique nationally),
 // served by the launcher at /taba-docs — so the dashboard's document links
 // work in the web app, and repeat analyses near the same site reuse the files.
-const TABA_DOCS_DIR = path.resolve(CONFIG.cache_dir ?? "./cache", "taba-docs");
+// The path is defined in lib/tabaAnalysis.js (single source of truth for the
+// document-analysis phase, which reads the same files).
+const { TABA_DOCS_DIR } = require("./lib/tabaAnalysis");
 
 /** Run fn over items with at most `limit` in flight at once. */
 async function mapLimit(items, limit, fn) {
@@ -1720,6 +1722,28 @@ makeToggle('toggle-stat-area', layerStatArea);`
   .taba-detail-mavat { margin-top: 8px; padding-top: 7px; border-top: 1px solid #e8e8e8; }
   .taba-detail-mavat a { font-size: 10px; color: #999; text-decoration: none; }
   .taba-detail-mavat a:hover { color: #4a90d9; }
+
+  /* Document-analysis block inside the detail panel */
+  #taba-analysis-slot { margin-top: 8px; padding-top: 7px; border-top: 1px solid #e8e8e8; }
+  .taba-analysis-status { font-size: 10px; color: #aaa; direction: rtl; }
+  .taba-governs-badge {
+    display: inline-block; background: #2d8a4e; color: #fff;
+    padding: 2px 8px; border-radius: 10px; font-size: 9px; font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .taba-rights-table { width: 100%; border-collapse: collapse; direction: rtl; margin-top: 4px; }
+  .taba-rights-table th, .taba-rights-table td {
+    font-size: 10px; padding: 3px 5px; border-bottom: 1px solid #f0f0f0; text-align: right;
+  }
+  .taba-rights-table th { color: #999; font-weight: 600; }
+  .taba-rights-table td { color: #444; }
+  .taba-landuse-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; direction: rtl; }
+  .taba-landuse-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 9px; color: #666;
+  }
+  .taba-landuse-chip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .taba-analysis-src { font-size: 9px; color: #bbb; margin-top: 6px; direction: rtl; }
   .taba-detail-close {
     float: left; cursor: pointer; color: #bbb; font-size: 15px; line-height: 1;
     padding: 0 2px; margin-top: -2px;
@@ -2516,8 +2540,116 @@ function showTABADetail(plan) {
   var docs = tabaDocLinks(plan, null);
   if (docs.length) h += '<div class="taba-detail-docs">' + docs.join('') + '</div>';
   h += '<div class="taba-detail-mavat"><a href="' + mavatUrl + '" target="_blank" rel="noopener">&#8599; פתח במקור (מבא&quot;ת)</a></div>';
+  h += '<div id="taba-analysis-slot"><div class="taba-analysis-status">טוען ניתוח מסמכים…</div></div>';
   panel.innerHTML = h;
   panel.classList.add('visible');
+  loadTABAAnalysis(plan.planNumber);
+}
+
+// ── TABA document analysis (lazy, server-parsed) ─────────────
+// Fetches /taba-analysis/<plan> — land-use polygons from the plan's mmg.zip
+// (or Xplan), and building rights from the takanon's Table 5. First request
+// per plan parses on the server; afterwards it's served from disk cache.
+
+var tabaAnalysisCache = {};   // planNumber -> record
+var tabaLandUseLayer  = null; // Leaflet layer of the selected plan's land use
+
+function clearTABALandUse() {
+  if (tabaMap && tabaLandUseLayer) { tabaMap.removeLayer(tabaLandUseLayer); }
+  tabaLandUseLayer = null;
+}
+
+function loadTABAAnalysis(planNumber) {
+  if (tabaAnalysisCache[planNumber]) {
+    renderTABAAnalysis(planNumber, tabaAnalysisCache[planNumber]);
+    return;
+  }
+  var url = '/taba-analysis/' + encodeURIComponent(planNumber) +
+    '?lat=' + SITE_CENTER.lat + '&lon=' + SITE_CENTER.lon;
+  fetch(url)
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(record) {
+      tabaAnalysisCache[planNumber] = record;
+      renderTABAAnalysis(planNumber, record);
+    })
+    .catch(function() {
+      var slot = document.getElementById('taba-analysis-slot');
+      // fetch fails on CLI file:// output (no server) — degrade quietly
+      if (slot) slot.innerHTML = '<div class="taba-analysis-status">ניתוח מסמכים אינו זמין</div>';
+    });
+}
+
+function renderTABAAnalysis(planNumber, record) {
+  // Only render if this plan is still the selected one
+  var selected = document.querySelector('.taba-plan-item.selected');
+  if (!selected || selected.dataset.plan !== planNumber) return;
+  var slot = document.getElementById('taba-analysis-slot');
+  if (!slot) return;
+
+  var h = '';
+  if (record.governsSitePoint) h += '<div class="taba-governs-badge">חלה על נקודת האתר</div>';
+
+  // Rights table (takanon Table 5)
+  var rights = record.rights || [];
+  if (rights.length) {
+    var cols = [
+      { key: 'farPercent',      label: '% בנייה' },
+      { key: 'coveragePercent', label: 'תכסית' },
+      { key: 'floorsAbove',     label: 'קומות' },
+      { key: 'floorsBelow',     label: 'מרתף' },
+      { key: 'heightM',         label: 'גובה (מ\\')' },
+      { key: 'units',           label: 'יח"ד' },
+    ].filter(function(c) { return rights.some(function(r) { return r[c.key] != null; }); });
+    h += '<table class="taba-rights-table"><tr><th>ייעוד</th>';
+    cols.forEach(function(c) { h += '<th>' + c.label + '</th>'; });
+    h += '</tr>';
+    rights.forEach(function(r) {
+      h += '<tr><td>' + (r.designation || '—') + '</td>';
+      cols.forEach(function(c) { h += '<td>' + (r[c.key] != null ? r[c.key] : '—') + '</td>'; });
+      h += '</tr>';
+    });
+    h += '</table>';
+    var pg = rights[0].source && rights[0].source.page;
+    if (pg) h += '<div class="taba-analysis-src">מתוך התקנון, עמ\\' ' + pg + '</div>';
+  }
+
+  // Land-use overlay + legend
+  clearTABALandUse();
+  var landUse = record.landUse || [];
+  if (landUse.length && tabaMap) {
+    var group = L.featureGroup();
+    landUse.forEach(function(lu) {
+      if (!lu.geometry) return;
+      var layer = L.geoJSON(lu.geometry, {
+        style: { color: lu.color, weight: 1, fillColor: lu.color, fillOpacity: 0.35 },
+      });
+      var tip = (lu.designation || 'ייעוד לא ידוע') + (lu.areaDunams ? ' · ' + lu.areaDunams + ' דונם' : '');
+      layer.bindTooltip(tip, { sticky: true, direction: 'top' });
+      group.addLayer(layer);
+    });
+    group.addTo(tabaMap);
+    tabaLandUseLayer = group;
+
+    var seen = {};
+    h += '<div class="taba-landuse-legend">';
+    landUse.forEach(function(lu) {
+      var key = lu.designation || 'אחר';
+      if (seen[key]) return; seen[key] = 1;
+      h += '<span class="taba-landuse-chip"><i style="background:' + lu.color + '"></i>' + key + '</span>';
+    });
+    h += '</div>';
+  }
+
+  if (!rights.length && !landUse.length) {
+    h += '<div class="taba-analysis-status">אין נתונים ניתנים לחילוץ ממסמכי התכנית' +
+      (record.notes && record.notes.length ? ' (' + record.notes[0] + ')' : '') + '</div>';
+  } else {
+    var srcNames = { 'mmg': 'ממ"ג', 'xplan': 'Xplan', 'takanon-text': 'תקנון' };
+    var srcs = (record.sources || []).map(function(s) { return srcNames[s] || s; });
+    if (srcs.length) h += '<div class="taba-analysis-src">מקורות: ' + srcs.join(', ') + ' · הנתונים אינפורמטיביים בלבד — המסמך המחייב הוא התקנון</div>';
+  }
+
+  slot.innerHTML = h;
 }
 
 function closeTABADetail() {
@@ -2525,6 +2657,7 @@ function closeTABADetail() {
   if (panel) { panel.classList.remove('visible'); panel.innerHTML = ''; }
   document.querySelectorAll('.taba-plan-item.selected').forEach(function(el) { el.classList.remove('selected'); });
   if (tabaMap && tabaHighlightLayer) { tabaMap.removeLayer(tabaHighlightLayer); tabaHighlightLayer = null; }
+  clearTABALandUse();
 }
 
 function selectTABAPlan(planNumber) {
@@ -2541,8 +2674,9 @@ function selectTABAPlan(planNumber) {
   if (plan) showTABADetail(plan);
 
   if (tabaMap) {
-    // Remove previous highlight
+    // Remove previous highlight and previous plan's land-use overlay
     if (tabaHighlightLayer) { tabaMap.removeLayer(tabaHighlightLayer); tabaHighlightLayer = null; }
+    clearTABALandUse();
 
     var planLayer = tabaLayers[planNumber];
     if (planLayer) {
@@ -2699,7 +2833,9 @@ async function runAnalysis(address, onProgress, options = {}) {
       train:     transit.train,
     },
     demographics: cbsData  ?? null,
-    taba:         tabaData ?? null,
+    // analysisUrlTemplate: embedding apps (Cuboid Studio) can fetch per-plan
+    // structured land-use + rights from GET /taba-analysis/<planNumber>.
+    taba: tabaData ? { ...tabaData, analysisUrlTemplate: "/taba-analysis/{planNumber}" } : null,
   };
 
   // Cache only successful runs (any fatal layer failure throws before this).
