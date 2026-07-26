@@ -40,28 +40,31 @@ that fixes it:
 
 ### Plan
 
-- **N0 — probe (needs a network-enabled machine, ½ day):** hit the GovMap
-  ArcGIS catalog and pin exact national layer ids for buildings and
-  parcels; confirm attribute schemas (height/floors fields, gush/chelka
-  fields). The dev sandbox can't reach gov endpoints, so this runs on the
-  deployed env or locally; findings go into this doc.
-- **N1 — no layer is fatal (½–1 day):** wrap buildings/trees/streets so a
-  missing layer degrades to an empty FeatureCollection + a sidebar notice
-  instead of failing the run. Prerequisite for everything else; fixes
-  "trees throw outside TLV" immediately.
-- **N2 — provider chains (1 day):** refactor each fetcher into an ordered
-  provider list — `buildings: [govmapNational, telAvivGis, osmBuildings]`,
-  `cadastre: [govmapParcels, telAvivGis]`, `trees: [telAvivGis, osmTrees]`
-  — first provider that returns features wins; the winner is recorded in
-  the data payload (`layerSources`) so the UI can cite it.
-- **N3 — implement the national providers (1–1.5 days):** GovMap buildings
-  + parcels queries (same ArcGIS code path as today), OSM buildings
-  fallback (already have the Overpass + levels-to-height machinery from
-  the height gap-fill), OSM trees fallback.
-
-**Total ~3–4 days.** After N3: any Israeli address gets buildings (GovMap
-or OSM quality), gush/chelka → full TABA chain, trees where data exists,
-and no address can 500 the run because of a missing municipal layer.
+- ✅ **N1 — no layer is fatal (shipped 2026-07-26):** buildings, trees,
+  registration blocks, and streets/transit all degrade to an empty layer
+  plus a map coverage notice instead of failing the run. Only geocoding
+  remains fatal (nothing to show without a point).
+- ✅ **N2 — provider chains (shipped 2026-07-26):** each layer tries an
+  ordered provider list; first provider returning features wins, and the
+  winner is recorded in `data.layerSources` and cited by the coverage
+  notices. Chains: `buildings: [govmap, telaviv-gis, osm]`,
+  `trees: [telaviv-gis, osm]`, `registration/parcel-at-point:
+  [telaviv-gis, govmap]`.
+- ✅ **N3a — OSM fallback providers (shipped 2026-07-26):** OSM building
+  footprints with heights from `height`/`building:levels` tags (9.6 m
+  default otherwise, flagged), and OSM `natural=tree` points. Any Israeli
+  address now gets at least OSM-quality buildings and the run cannot 500
+  on a missing municipal layer.
+- **N0 — probe (pending, needs a network-enabled machine, ½ day):** hit
+  the GovMap ArcGIS catalog and pin exact national layer ids for
+  buildings and parcels (the `govmap` chain slots currently rely on
+  keyword discovery, which the audit observed failing); confirm attribute
+  schemas. Findings go into this doc, then the govmap providers get
+  pinned URLs.
+- **N3b — city adapters (pending N0-style probes, ~½ day each):**
+  Jerusalem, Haifa, Beer-Sheva municipal ArcGIS adapters slotted into the
+  chains ahead of the OSM fallback.
+- **N4 — tree-data source survey (pending, ½ day):** see decision 2.
 
 ### Decisions (2026-07-26)
 
