@@ -304,19 +304,28 @@ const HTML = `<!DOCTYPE html>
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: #f4f4f0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     min-height: 100vh;
-    padding: 24px;
+  }
+  /* Map-first: the map IS the page; the search card floats above it. */
+  #pin-map {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    cursor: crosshair;
   }
   .card {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1000;
     background: #fff;
     border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(0,0,0,.1);
-    padding: 40px 48px;
-    width: 100%;
-    max-width: 560px;
+    box-shadow: 0 4px 24px rgba(0,0,0,.18);
+    padding: 24px 28px;
+    width: 380px;
+    max-width: calc(100vw - 40px);
+    max-height: calc(100vh - 40px);
+    overflow: visible;
   }
   h1 { font-size: 20px; font-weight: 700; letter-spacing: .04em; color: #111; margin-bottom: 4px; }
   .subtitle { font-size: 13px; color: #888; margin-bottom: 32px; }
@@ -374,18 +383,7 @@ const HTML = `<!DOCTYPE html>
   .spinner.active { display: block; }
   @keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
 
-  .pin-map-label {
-    margin-top: 18px;
-    font-size: 12px; font-weight: 600; letter-spacing: .08em;
-    text-transform: uppercase; color: #555; margin-bottom: 8px;
-  }
-  #pin-map {
-    height: 240px;
-    border: 1.5px solid #ddd;
-    border-radius: 8px;
-    cursor: crosshair;
-  }
-  .pin-hint { font-size: 11px; color: #999; margin-top: 6px; }
+  .pin-hint { font-size: 11px; color: #999; margin-top: 10px; }
 
   .progress-wrap {
     margin-top: 20px;
@@ -500,9 +498,10 @@ const HTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="pin-map"></div>
 <div class="card">
   <h1>Context Mapper</h1>
-  <p class="subtitle">חפש כתובת כדי להתחיל בניתוח</p>
+  <p class="subtitle">חפש כתובת או לחץ על המפה כדי להתחיל בניתוח</p>
 
   <label for="addr-input">כתובת</label>
   <div class="input-wrap">
@@ -510,9 +509,6 @@ const HTML = `<!DOCTYPE html>
     <div class="spinner" id="spinner"></div>
     <div class="dropdown" id="dropdown"></div>
   </div>
-
-  <div class="pin-map-label">או בחר נקודה על המפה</div>
-  <div id="pin-map"></div>
   <div class="pin-hint">לחיצה על המפה בוחרת את נקודת הניתוח</div>
 
   <div class="confirm-card" id="confirm-card">
@@ -839,6 +835,8 @@ var BOOT_SITE = __BOOT_SITE__;
     selectedLon     = BOOT_SITE.lon;
     selectedRadius  = BOOT_SITE.radius;
 
+    setPin(selectedLat, selectedLon);
+    pinMap.setView([selectedLat, selectedLon], 15);
     input.value = selectedAddress;
     confirmAddr.textContent = selectedAddress;
     confirmCad.innerHTML =
