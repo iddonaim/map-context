@@ -26,56 +26,67 @@ const CANDIDATES = [
 
 const XPLAN = "https://ags.iplan.gov.il/arcgisiplan/rest/services/PlanningPublic/Xplan/MapServer";
 
-async function getJson(url, timeout = 15000) {
+async function getJson(url, timeout = 10000) {
   const res = await axios.get(url, { params: { f: "json" }, headers: HEADERS, timeout });
   return res.data;
 }
 
 async function probeCatalog(c) {
-  console.log(`\n━━ ${c.name}\n   ${c.url}`);
+  const out = [`\n━━ ${c.name}`, `   ${c.url}`];
   let data;
   try {
     data = await getJson(c.url);
   } catch (e) {
-    console.log(`   ✗ ${e.response?.status ?? e.code ?? e.message}`);
-    return;
+    out.push(`   ✗ ${e.response?.status ?? e.code ?? e.message}`);
+    return out;
   }
   const folders  = data.folders  ?? [];
   const services = data.services ?? [];
-  console.log(`   ✓ reachable — ${folders.length} folders, ${services.length} services`);
+  out.push(`   ✓ reachable — ${folders.length} folders, ${services.length} services`);
 
   const interesting = services.filter(s => LAYER_KWS.test(s.name));
-  for (const s of interesting.slice(0, 15)) console.log(`   • service: ${s.name} (${s.type})`);
+  for (const s of interesting.slice(0, 15)) out.push(`   • service: ${s.name} (${s.type})`);
 
   // One level of folders, looking for relevant service names
   for (const folder of folders.slice(0, 25)) {
     try {
       const fd = await getJson(`${c.url}/${folder}`);
       const hits = (fd.services ?? []).filter(s => LAYER_KWS.test(s.name));
-      for (const s of hits.slice(0, 10)) console.log(`   • ${folder}/: ${s.name} (${s.type})`);
+      for (const s of hits.slice(0, 10)) out.push(`   • ${folder}/: ${s.name} (${s.type})`);
     } catch (_) { /* skip unreadable folder */ }
   }
   if (!interesting.length && !folders.length) {
-    for (const s of services.slice(0, 10)) console.log(`   · service: ${s.name} (${s.type})`);
+    for (const s of services.slice(0, 10)) out.push(`   · service: ${s.name} (${s.type})`);
   }
+  return out;
 }
 
-(async () => {
-  console.log("map-context source probe — paste this whole output back\n");
+/** Run the full probe; returns the report as text. Catalogs probe in
+ *  parallel so the whole thing stays within ~30s even with timeouts. */
+async function runProbe() {
+  const lines = ["map-context source probe — paste this whole output back"];
 
-  for (const c of CANDIDATES) {
-    await probeCatalog(c);
-  }
+  const sections = await Promise.all(CANDIDATES.map(c =>
+    probeCatalog(c).catch(e => [`\n━━ ${c.name}`, `   ✗ probe error: ${e.message}`])
+  ));
+  for (const s of sections) lines.push(...s);
 
-  console.log(`\n━━ Xplan layer inventory\n   ${XPLAN}`);
+  lines.push(`\n━━ Xplan layer inventory`, `   ${XPLAN}`);
   try {
     const data = await getJson(XPLAN);
     for (const l of data.layers ?? []) {
-      console.log(`   layer ${String(l.id).padStart(3)}: ${l.name}`);
+      lines.push(`   layer ${String(l.id).padStart(3)}: ${l.name}`);
     }
   } catch (e) {
-    console.log(`   ✗ ${e.response?.status ?? e.message}`);
+    lines.push(`   ✗ ${e.response?.status ?? e.message}`);
   }
 
-  console.log("\nDone.");
-})();
+  lines.push("\nDone.");
+  return lines.join("\n");
+}
+
+module.exports = { runProbe };
+
+if (require.main === module) {
+  runProbe().then(text => console.log(text));
+}
