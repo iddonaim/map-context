@@ -4,7 +4,7 @@ const express = require("express");
 const path    = require("path");
 const axios           = require("axios");
 const fs              = require("fs");
-const { runAnalysis } = require("./index");
+const { runAnalysis, TABA_DOCS_DIR } = require("./index");
 const { buildAtlas }  = require("./atlas");
 const { parseSiteParams } = require("./lib/siteParams");
 
@@ -12,6 +12,10 @@ const PORT = process.env.PORT || 3111;
 
 const app = express();
 app.use(express.json());
+
+// Plan documents downloaded by the TABA phase — the dashboard's document
+// links (/taba-docs/<plan>/<file>) resolve here.
+app.use("/taba-docs", express.static(TABA_DOCS_DIR));
 
 // ---- Endpoint: run analysis as a service --------------------
 
