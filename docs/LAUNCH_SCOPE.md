@@ -55,12 +55,30 @@ that fixes it:
   default otherwise, flagged), and OSM `natural=tree` points. Any Israeli
   address now gets at least OSM-quality buildings and the run cannot 500
   on a missing municipal layer.
-- **N0 — probe (pending, needs a network-enabled machine, ½ day):** hit
-  the GovMap ArcGIS catalog and pin exact national layer ids for
-  buildings and parcels (the `govmap` chain slots currently rely on
-  keyword discovery, which the audit observed failing); confirm attribute
-  schemas. Findings go into this doc, then the govmap providers get
+- **N0 — probe (in progress):** live run 2026-07-26 confirmed
+  `ags.govmap.gov.il/arcgis/rest/services` is a hard **404** — the govmap
+  chain slots can never win at that URL. `npm run probe`
+  (`scripts/probe-sources.js`) checks candidate catalogs (govmap URL
+  variants, mapi.gov.il / Survey of Israel, Jerusalem/Haifa/Beer-Sheva
+  municipal portals) and dumps the Xplan layer inventory — run it from a
+  network-enabled machine and paste the output; then the providers get
   pinned URLs.
+
+  Other round-1 live findings (Dizengoff + Petah Tikva runs):
+  - Provider chains verified in production — PT got OSM buildings (306)
+    + OSM trees (52), demographics resolved to LocalityCode 7900. ✔
+  - Old plans' mmg zips carry only a plan boundary (0 land-use layers) —
+    expected for pre-digital plans.
+  - Two modern-plan mmg zips failed `unzipper` with FILE_ENDED in ~2 s
+    (not a timeout). Fixes shipped: buffer-mode reparse fallback, EOCD
+    integrity check before caching, truncated files auto-removed.
+  - Xplan land-use polygons returned but with null designations (attr
+    keywords missed) and the boundary layer matched nothing — fixes
+    shipped: widened keywords (MAVAT_*), per-layer tries + attribute-key
+    samples recorded in the analysis record's `layersFound`/`debug`.
+  - Takanon Table 5 detected but unparsed — parser now merges split
+    cells, handles two-row stacked headers, and records the table page's
+    first rows in `debug.takanonRows` when it still fails.
 - **N3b — city adapters (pending N0-style probes, ~½ day each):**
   Jerusalem, Haifa, Beer-Sheva municipal ArcGIS adapters slotted into the
   chains ahead of the OSM fallback.
