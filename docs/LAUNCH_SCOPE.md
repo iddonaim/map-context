@@ -20,23 +20,60 @@
   to the picker).
 - ✅ **Pin-drop on a map** in the picker as an alternative to address
   search (click → reverse-geocoded address → run).
-- ✅ **`analysis-reset` postMessage** to the embedding app when a new run
-  starts or the user returns to the picker (Cuboid side must listen — see
-  below).
 - ✅ **Demographics no longer default to Tel Aviv** for non-TLV sites:
   reverse-geocode → census locality lookup; the 6900 fallback only applies
   inside Tel Aviv's bbox.
 
-## Needs cuboid-studio access (handoff list)
+## Non-TLV (nationwide) coverage — scope
 
-1. **"Go to Encode" toast persists after "ניתוח חדש"** — listen for the new
-   `{type: 'analysis-reset'}` postMessage (same relay path as
-   `analysis-complete`) and dismiss the toast/CTA.
-2. **Toast position** — it floats over the picker's progress text; move it
-   to a bottom bar / larger button row as suggested.
-3. Optional: consume `data.demographicsUrl` (demographics are no longer in
-   the initial `analysis-complete` payload when the fast path is used) and
-   `data.taba.analysisUrlTemplate` for per-plan rights.
+Where each layer stands today outside Tel Aviv, and the national source
+that fixes it:
+
+| Layer | Today | Outside TLV today | National source (proposed) |
+|---|---|---|---|
+| Geocoding, streets/transit/institutions, elevation | Nominatim / Overpass / OpenTopo | ✔ already national | — |
+| Demographics | CBS census by locality | ✔ national since this PR | — |
+| TABA plans + documents + Meirim | land.gov.il / Meirim | ✔ national APIs | — (needs gush/chelka, see cadastre) |
+| **Buildings + heights** | GovMap catalog discovery (observed failing) → TLV GIS fallback | **empty** (Petah Tikva run: 0 buildings) | GovMap national buildings layer (probe & pin exact service); **OSM buildings as universal fallback** (footprints + `building:levels`) |
+| **Cadastre (גוש/חלקה, registration blocks)** | TLV GIS layer | **empty** → TABA search gets no gush → plan lookup degrades | GovMap national parcels/gushim layers (Survey-of-Israel data, open ArcGIS) |
+| **Trees** | TLV Open Data — and currently **fatal**: throws where no layer exists | **fails the whole run** in cities without a matching layer | OSM `natural=tree` fallback (sparse but honest); per-city GIS adapters (Jerusalem, Haifa expose ArcGIS) as optional upgrades |
+
+### Plan
+
+- **N0 — probe (needs a network-enabled machine, ½ day):** hit the GovMap
+  ArcGIS catalog and pin exact national layer ids for buildings and
+  parcels; confirm attribute schemas (height/floors fields, gush/chelka
+  fields). The dev sandbox can't reach gov endpoints, so this runs on the
+  deployed env or locally; findings go into this doc.
+- **N1 — no layer is fatal (½–1 day):** wrap buildings/trees/streets so a
+  missing layer degrades to an empty FeatureCollection + a sidebar notice
+  instead of failing the run. Prerequisite for everything else; fixes
+  "trees throw outside TLV" immediately.
+- **N2 — provider chains (1 day):** refactor each fetcher into an ordered
+  provider list — `buildings: [govmapNational, telAvivGis, osmBuildings]`,
+  `cadastre: [govmapParcels, telAvivGis]`, `trees: [telAvivGis, osmTrees]`
+  — first provider that returns features wins; the winner is recorded in
+  the data payload (`layerSources`) so the UI can cite it.
+- **N3 — implement the national providers (1–1.5 days):** GovMap buildings
+  + parcels queries (same ArcGIS code path as today), OSM buildings
+  fallback (already have the Overpass + levels-to-height machinery from
+  the height gap-fill), OSM trees fallback.
+
+**Total ~3–4 days.** After N3: any Israeli address gets buildings (GovMap
+or OSM quality), gush/chelka → full TABA chain, trees where data exists,
+and no address can 500 the run because of a missing municipal layer.
+
+### Discussion points
+
+1. Buildings *heights* outside TLV will be weaker: GovMap's national layer
+   may lack heights (probe tells us); OSM `building:levels` covers major
+   cities patchily. Default-height massing (9.6 m) fills the rest —
+   acceptable for context, visible in the 3D atlas. OK?
+2. Trees outside the big cities will be sparse-to-empty. Show honest
+   per-layer source + count notices rather than pretending coverage.
+3. Which cities does the demo actually need? If it's TLV + 2–3 known
+   cities, per-city GIS adapters (Jerusalem/Haifa) may beat OSM quality
+   and are ~½ day each after N2.
 
 ## 4 — Pre-caching Tel Aviv (static-layer cache)
 
@@ -93,10 +130,8 @@ tab reads as broken; a hidden one doesn't exist). Priority order:
 
 ## Known launch risks (carried from earlier docs)
 
-- Non-TLV addresses: buildings/trees come from Tel Aviv GIS only —
-  outside TLV those layers are empty (see Petah Tikva run). GovMap
-  national-layer discovery is the fix; treat as post-launch unless the
-  demo includes non-TLV sites.
+- Non-TLV addresses: see the nationwide-coverage scope above (N0–N3) —
+  buildings/trees/cadastre are TLV-only today and trees can fail the run.
 - TABA analysis heuristics await live calibration (`TABA_ANALYSIS_SCOPE.md`
   status note): run one real analysis, check `/taba-analysis/<plan>` JSON
   (`layersFound`, `notes`).

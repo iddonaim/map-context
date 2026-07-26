@@ -586,13 +586,6 @@ var BOOT_SITE = __BOOT_SITE__;
   var selectedRadius  = null;
   var runAbort        = null;
 
-  // Tell the embedding app (Cuboid Studio) that any previous analysis is no
-  // longer on screen — it should dismiss "analysis ready" UI. Sent when a
-  // new run starts and when the user returns to the picker.
-  function postReset() {
-    if (window.parent !== window) window.parent.postMessage({ type: 'analysis-reset' }, '*');
-  }
-
   function showConfirm() {
     confirmAddr.textContent = selectedAddress;
     confirmCad.innerHTML =
@@ -733,7 +726,7 @@ var BOOT_SITE = __BOOT_SITE__;
     // Navigate to a clean "/" — never reload. When the page was booted via
     // query params, a reload would re-trigger the auto-run instead of
     // returning to the picker.
-    backBtn.addEventListener('click', function () { postReset(); window.location.href = '/'; });
+    backBtn.addEventListener('click', function () { window.location.href = '/'; });
 
     var frame = document.createElement('iframe');
     frame.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9998';
@@ -768,7 +761,6 @@ var BOOT_SITE = __BOOT_SITE__;
   });
 
   function runAnalysis() {
-    postReset();
     runBtn.disabled = true;
     errorMsg.classList.remove('show');
     setProgress('מתחיל...', 0);
