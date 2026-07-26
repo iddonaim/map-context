@@ -1,6 +1,17 @@
 # TABA Document Analysis — Scope (2026-07-26)
 
-> Status: **proposal, not started.** Companion to `AUDIT_2026-07-12.md`.
+> Status: **P0–P3 implemented 2026-07-26** (`lib/tabaAnalysis.js`,
+> `lib/takanonRights.js`, `GET /taba-analysis/:plan`, TABA-tab UI).
+> P0 was adapted: government endpoints were unreachable from the dev
+> sandbox, so instead of a live-plan fixture corpus, the shapefile path is
+> tested against generated spec-correct binaries
+> (`test/fixtures/buildMmgZip.js`) and the heuristics carry a **live
+> calibration list**: (1) real mmg.zip layer names/attribute schemas per
+> plan era, (2) Xplan layer ids + plan-number field names, (3) takanon
+> Table-5 header vocabulary across producers. Run one analysis on a real
+> address, then check `layersFound`/`notes` in
+> `cache/taba-analysis/*.json` to calibrate.
+> Companion to `AUDIT_2026-07-12.md`.
 > Context: since PR #19 the pipeline fetches the plan list, real plan
 > boundaries (via Meirim), and downloads plan documents (תקנון / תשריט /
 > ממ"ג) to `cache/taba-docs/` — but **nothing ever opens them**. The
@@ -20,9 +31,8 @@ Make the app answer three questions it currently can't:
    every plan touching the gush; nothing marks the ones whose boundary
    contains the analyzed parcel.
 
-Downstream payoff: `data.taba.analysis` gives Cuboid Studio enough to
-extrude massing envelopes (footprint × floors/height) — the concrete
-convergence step item 3 of the audit's "convergence surface" points at.
+The structured output is part of this app's data payload; anything a
+consumer does with it downstream is outside this repo's scope.
 
 ## Source inventory, ranked by structure (use cheapest signal first)
 
@@ -85,8 +95,8 @@ convergence step item 3 of the audit's "convergence surface" points at.
   indicator when values came from OCR/heuristics.
 - **Sidebar:** a "Planning rights" section — governing plans at the site
   point with their headline numbers.
-- **Data payload:** `data.taba.analysis` array for embedding apps
-  (Cuboid Studio massing).
+- **Data payload:** per-plan analysis is served by `GET
+  /taba-analysis/:plan`; the run payload itself stays unchanged.
 
 ## Phases & estimates
 

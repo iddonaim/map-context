@@ -4,18 +4,104 @@ const express = require("express");
 const path    = require("path");
 const axios           = require("axios");
 const fs              = require("fs");
-const { runAnalysis, TABA_DOCS_DIR } = require("./index");
+const { runAnalysis, fetchCBSData, TABA_DOCS_DIR } = require("./index");
 const { buildAtlas }  = require("./atlas");
 const { parseSiteParams } = require("./lib/siteParams");
+const { analyzePlan, withGovernsSitePoint } = require("./lib/tabaAnalysis");
+const { ensurePlanDoc } = require("./lib/tabaDocs");
 
 const PORT = process.env.PORT || 3111;
 
 const app = express();
 app.use(express.json());
 
-// Plan documents downloaded by the TABA phase — the dashboard's document
-// links (/taba-docs/<plan>/<file>) resolve here.
+// Plan documents — the dashboard's document links (/taba-docs/<plan>/<file>)
+// resolve here. Already-downloaded files are served statically; a miss falls
+// through to the on-demand downloader, which fetches the file from the
+// source recorded during the run, caches it, then serves it.
 app.use("/taba-docs", express.static(TABA_DOCS_DIR));
+
+app.get("/taba-docs/:safe/:file", async (req, res) => {
+  try {
+    const localPath = await ensurePlanDoc(req.params.safe, req.params.file);
+    if (!localPath) return res.status(404).send("document unavailable");
+    res.sendFile(localPath);
+  } catch (err) {
+    res.status(500).send("document fetch failed");
+  }
+});
+
+// ---- Endpoint: deferred CBS demographics ---------------------
+// The web dashboard ships before demographics resolve and fetches them
+// here (the data payload's demographicsUrl points here too). fetchCBSData
+// keeps its own per-coordinate disk cache, so repeats are instant.
+
+const cbsRuns = new Map(); // in-flight dedupe by rounded coordinate
+
+app.get("/cbs-data", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const lat = parseFloat(req.query.lat);
+  const lon = parseFloat(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < 29 || lat > 34 || lon < 33.5 || lon > 36) {
+    return res.status(400).json({ error: "valid lat/lon required" });
+  }
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  try {
+    if (!cbsRuns.has(key)) {
+      cbsRuns.set(key, fetchCBSData(lat, lon).finally(() => cbsRuns.delete(key)));
+    }
+    res.json(await cbsRuns.get(key));
+  } catch (err) {
+    res.status(500).json({ error: err.message || "CBS fetch failed" });
+  }
+});
+
+// ---- Endpoint: Nominatim reverse proxy (pin-drop → address) --
+
+app.get("/reverse", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lon = parseFloat(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return res.status(400).json({ error: "lat/lon required" });
+  }
+  try {
+    const response = await axios.get("https://nominatim.openstreetmap.org/reverse", {
+      params: { lat, lon, format: "json", zoom: 18, "accept-language": "he,en" },
+      headers: { "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
+      timeout: 8000,
+    });
+    res.json(response.data);
+  } catch (err) {
+    res.status(502).json({ error: "reverse geocode failed" });
+  }
+});
+
+// ---- Endpoint: per-plan document analysis (lazy) -------------
+// Parses the plan's downloaded documents (mmg.zip shapefiles, takanon PDF)
+// into structured land-use + rights data. Deliberately NOT part of
+// runAnalysis: first request parses and caches (plan facts are
+// address-independent), later requests are instant. ?lat&lon adds a
+// computed governsSitePoint for that site point.
+
+const analysisRuns = new Map(); // in-flight dedupe, keyed by plan number
+
+app.get("/taba-analysis/:plan", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const plan = String(req.params.plan || "").trim().slice(0, 80);
+  if (!plan) return res.status(400).json({ error: "plan number required" });
+
+  try {
+    if (!analysisRuns.has(plan)) {
+      analysisRuns.set(plan, analyzePlan(plan).finally(() => analysisRuns.delete(plan)));
+    }
+    const record = await analysisRuns.get(plan);
+    const lat = parseFloat(req.query.lat);
+    const lon = parseFloat(req.query.lon);
+    res.json(withGovernsSitePoint(record, lat, lon));
+  } catch (err) {
+    res.status(500).json({ error: err.message || "analysis failed" });
+  }
+});
 
 // ---- Endpoint: run analysis as a service --------------------
 
@@ -99,11 +185,14 @@ app.post("/run", async (req, res) => {
   };
 
   try {
+    // deferCbs: the dashboard ships as soon as the fast layers resolve;
+    // demographics stream in afterwards via /cbs-data.
     const result = await runAnalysis(address.trim(), (progress) => {
       sendEvent("progress", progress);
     }, {
       center: site ? { lat: site.lat, lon: site.lon } : null,
       radius: site ? site.radius : radius,
+      deferCbs: true,
     });
     // Embed SITE_DATA as a JSON constant and fire postMessage when the dashboard iframe loads.
     // </script> inside JSON values is escaped to <\/script> so the HTML parser won't close the tag early.
@@ -208,6 +297,8 @@ const HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Context Mapper — בחירת כתובת</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -283,11 +374,35 @@ const HTML = `<!DOCTYPE html>
   .spinner.active { display: block; }
   @keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
 
+  .pin-map-label {
+    margin-top: 18px;
+    font-size: 12px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: #555; margin-bottom: 8px;
+  }
+  #pin-map {
+    height: 240px;
+    border: 1.5px solid #ddd;
+    border-radius: 8px;
+    cursor: crosshair;
+  }
+  .pin-hint { font-size: 11px; color: #999; margin-top: 6px; }
+
   .progress-wrap {
     margin-top: 20px;
     display: none;
   }
   .progress-wrap.show { display: block; }
+  .stop-btn {
+    padding: 4px 12px;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #888;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .stop-btn:hover { color: #b91c1c; border-color: #fca5a5; }
   .progress-header {
     display: flex;
     justify-content: space-between;
@@ -396,6 +511,10 @@ const HTML = `<!DOCTYPE html>
     <div class="dropdown" id="dropdown"></div>
   </div>
 
+  <div class="pin-map-label">או בחר נקודה על המפה</div>
+  <div id="pin-map"></div>
+  <div class="pin-hint">לחיצה על המפה בוחרת את נקודת הניתוח</div>
+
   <div class="confirm-card" id="confirm-card">
     <div class="confirm-address" id="confirm-address"></div>
     <div id="confirm-cadastral"></div>
@@ -406,7 +525,10 @@ const HTML = `<!DOCTYPE html>
   <div class="progress-wrap" id="progress-wrap">
     <div class="progress-header">
       <span class="progress-step-label" id="progress-label">מתחיל...</span>
-      <span class="progress-pct" id="progress-pct">0%</span>
+      <span>
+        <span class="progress-pct" id="progress-pct">0%</span>
+        <button class="stop-btn" id="stop-btn" style="margin-right:10px">עצור</button>
+      </span>
     </div>
     <div class="progress-track">
       <div class="progress-fill" id="progress-fill"></div>
@@ -455,11 +577,60 @@ var BOOT_SITE = __BOOT_SITE__;
   var errorText    = document.getElementById('error-text');
   var retryBtn     = document.getElementById('retry-btn');
 
+  var stopBtn         = document.getElementById('stop-btn');
+
   var debounceTimer   = null;
   var selectedAddress = null;
   var selectedLat     = null;
   var selectedLon     = null;
   var selectedRadius  = null;
+  var runAbort        = null;
+
+  function showConfirm() {
+    confirmAddr.textContent = selectedAddress;
+    confirmCad.innerHTML =
+      '<span style="color:#888;font-size:12px">' +
+      selectedLat.toFixed(6) + ', ' + selectedLon.toFixed(6) +
+      '</span>';
+    confirmCard.classList.add('show');
+    runBtn.classList.add('show');
+  }
+
+  // ---- Pin-drop map (alternative to address search) --------
+
+  var pinMarker = null;
+  var pinMap = L.map('pin-map').setView(
+    BOOT_SITE ? [BOOT_SITE.lat, BOOT_SITE.lon] : [32.07, 34.78], 13);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 20,
+  }).addTo(pinMap);
+
+  function setPin(lat, lon) {
+    if (pinMarker) pinMap.removeLayer(pinMarker);
+    pinMarker = L.marker([lat, lon]).addTo(pinMap);
+  }
+
+  pinMap.on('click', function (ev) {
+    var lat = ev.latlng.lat, lon = ev.latlng.lng;
+    setPin(lat, lon);
+    selectedLat = lat;
+    selectedLon = lon;
+    selectedAddress = lat.toFixed(5) + ', ' + lon.toFixed(5);
+    input.value = selectedAddress;
+    closeDropdown();
+    showConfirm();
+    // Enrich with a reverse-geocoded address; coordinates already work.
+    fetch('/reverse?lat=' + lat + '&lon=' + lon)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.display_name) {
+          selectedAddress = d.display_name;
+          input.value = selectedAddress;
+          showConfirm();
+        }
+      })
+      .catch(function () {});
+  });
 
   // ---- Autocomplete ----------------------------------------
 
@@ -520,14 +691,9 @@ var BOOT_SITE = __BOOT_SITE__;
 
     input.value = selectedAddress;
     closeDropdown();
-
-    confirmAddr.textContent = selectedAddress;
-    confirmCad.innerHTML =
-      '<span style="color:#888;font-size:12px">' +
-      selectedLat.toFixed(6) + ', ' + selectedLon.toFixed(6) +
-      '</span>';
-    confirmCard.classList.add('show');
-    runBtn.classList.add('show');
+    setPin(selectedLat, selectedLon);
+    pinMap.setView([selectedLat, selectedLon], 15);
+    showConfirm();
   }
 
   // ---- Progress helpers ------------------------------------
@@ -584,16 +750,28 @@ var BOOT_SITE = __BOOT_SITE__;
     runAnalysis();
   });
 
+  function resetRunUI() {
+    progressWrap.classList.remove('show');
+    runBtn.disabled = false;
+    runAbort = null;
+  }
+
+  stopBtn.addEventListener('click', function () {
+    if (runAbort) runAbort.abort();
+  });
+
   function runAnalysis() {
     runBtn.disabled = true;
     errorMsg.classList.remove('show');
     setProgress('מתחיל...', 0);
     progressWrap.classList.add('show');
+    runAbort = new AbortController();
 
     fetch('/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: selectedAddress, lat: selectedLat, lon: selectedLon, radius: selectedRadius }),
+      signal: runAbort.signal,
     }).then(function (response) {
       if (!response.ok || !response.body) {
         return response.json().then(function (d) {
@@ -643,6 +821,8 @@ var BOOT_SITE = __BOOT_SITE__;
 
       return pump();
     }).catch(function (err) {
+      // User pressed עצור — quietly return to the picker, no error banner.
+      if (err && err.name === 'AbortError') { resetRunUI(); return; }
       showError(err.message || 'שגיאת תקשורת');
     });
   }

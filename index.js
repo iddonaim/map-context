@@ -658,98 +658,50 @@ function parseTabaSearchPlan(item) {
   };
 }
 
-// ── Step C: Download plan documents from TabaSearch paths ───
+// ── Step C: Record plan-document sources (downloads are on-demand) ──
+//
+// Documents used to download during the run — the single longest wait in the
+// pipeline. Now the run only records each plan's source paths (no network);
+// lib/tabaDocs.js fetches a file the first time a /taba-docs link is clicked
+// or the analyzer needs it, then caches it. Docs live in one shared root
+// (plan numbers are unique nationally) so sites share downloaded files.
+const { TABA_DOCS_DIR, planSafeName } = require("./lib/tabaDocs");
 
-async function tryDownloadFile(url, magic) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise(r => setTimeout(r, 2000));
-    try {
-      const res = await axios.get(url, {
-        responseType: "arraybuffer",
-        timeout: 30000,
-        headers: { Referer: "https://apps.land.gov.il/TabaSearch/", "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
-        validateStatus: s => s < 500,
-      });
-      if (res.status === 404) return null;
-      const buf = Buffer.from(res.data);
-      if (magic && !buf.slice(0, magic.length).equals(Buffer.from(magic))) {
-        log("warn", `[TABA-C]   Unexpected content type at ${url.slice(-60)}`);
-        return null;
-      }
-      return buf;
-    } catch (e) {
-      if (attempt === 1) log("warn", `[TABA-C]   ${url.slice(-70)}: ${e.message}`);
-    }
-  }
-  return null;
-}
-
-// Plan documents live in one shared root (plan numbers are unique nationally),
-// served by the launcher at /taba-docs — so the dashboard's document links
-// work in the web app, and repeat analyses near the same site reuse the files.
-const TABA_DOCS_DIR = path.resolve(CONFIG.cache_dir ?? "./cache", "taba-docs");
-
-/** Run fn over items with at most `limit` in flight at once. */
-async function mapLimit(items, limit, fn) {
-  const results = new Array(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i], i);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
-async function downloadTabaSearchDocs(plans) {
+function writePlanDocSources(plans) {
   fs.mkdirSync(TABA_DOCS_DIR, { recursive: true });
-  let totalDownloaded = 0, totalFailed = 0;
+  let plansWithDocs = 0;
 
-  await mapLimit(plans, 4, async (plan) => {
+  for (const plan of plans) {
     const docSet = plan._docSet;
     delete plan._docSet;
-    if (!plan.planNumber || !docSet) return;
-
-    const safe    = plan.planNumber.replace(/[^a-zA-Z0-9\-\.]/g, "_");
-    const planDir = path.join(TABA_DOCS_DIR, safe);
-    fs.mkdirSync(planDir, { recursive: true });
+    if (!plan.planNumber || !docSet) continue;
 
     const normPath = p => p ? p.replace(/\\/g, "/") : null;
-
     const slots = [
       { key: "takanon", filename: "takanon.pdf", srcPath: normPath(docSet.takanon?.path),              magic: "%PDF" },
       { key: "tasrit",  filename: "tasrit.pdf",  srcPath: normPath(docSet.tasritim?.[0]?.path ?? docSet.tasritim?.path), magic: "%PDF" },
       { key: "mmg",     filename: "mmg.zip",     srcPath: normPath(docSet.mmg?.path),                  magic: "PK"   },
-    ];
+    ].filter(s => s.srcPath);
+    if (!slots.length) continue;
 
+    const safe    = planSafeName(plan.planNumber);
+    const planDir = path.join(TABA_DOCS_DIR, safe);
+    fs.mkdirSync(planDir, { recursive: true });
+
+    const files = {};
     for (const slot of slots) {
-      if (!slot.srcPath) continue;
-      const localPath = path.join(planDir, slot.filename);
-      const docUrl    = `/taba-docs/${safe}/${slot.filename}`;
-
-      if (fs.existsSync(localPath)) {
-        plan.documents[slot.key] = docUrl;
-        totalDownloaded++;
-        continue;
-      }
-
-      const url = `${TABASEARCH_DOC_BASE}${slot.srcPath}`;
-      const buf = await tryDownloadFile(url, slot.magic);
-      if (buf) {
-        fs.writeFileSync(localPath, buf);
-        plan.documents[slot.key] = docUrl;
-        log("ok", `[TABA-C] ${plan.planNumber}/${slot.filename} (${(buf.length / 1024).toFixed(0)} KB)`);
-        totalDownloaded++;
-      } else {
-        totalFailed++;
-      }
+      files[slot.filename] = { srcPath: slot.srcPath, magic: slot.magic };
+      plan.documents[slot.key] = `/taba-docs/${safe}/${slot.filename}`;
     }
-  });
-
-  return { totalDownloaded, totalFailed };
+    try {
+      fs.writeFileSync(path.join(planDir, "sources.json"),
+        JSON.stringify({ base: TABASEARCH_DOC_BASE, files }));
+      plansWithDocs++;
+    } catch (e) {
+      log("warn", `[TABA-C] sources.json write failed for ${plan.planNumber}: ${e.message}`);
+    }
+  }
+  return plansWithDocs;
 }
 
 // ── Step G: Fetch Meirim polygons as a separate spatial layer ─
@@ -811,7 +763,7 @@ async function fetchTABAData(lat, lon, slug, cacheDir, outDir, onProgress) {
 
   const tabaDir       = path.join(cacheDir, "taba");
   const tabaIndexPath = path.join(tabaDir, "taba_index.json");
-  const TABA_INDEX_VERSION = 2; // v2: plan polygons from Meirim, /taba-docs URLs
+  const TABA_INDEX_VERSION = 3; // v3: on-demand document sources (no inline downloads)
 
   if (fs.existsSync(tabaIndexPath)) {
     try {
@@ -852,25 +804,20 @@ async function fetchTABAData(lat, lon, slug, cacheDir, outDir, onProgress) {
   log("ok", `[TABA-B] ${plans.length} plans parsed`);
 
   if (plans.length > 0) {
-    // Steps C + G run in parallel: document downloads (the long pole) and
-    // Meirim polygon fetch are independent. Both non-fatal.
-    if (onProgress) onProgress({ step: "taba_docs", label: "Downloading plan documents", percent: 80 });
-    const [docsResult, meirimPolygons] = await Promise.all([
-      downloadTabaSearchDocs(plans).catch(e => {
-        log("warn", `[TABA-C] Document download failed: ${e.message}`);
-        return null;
-      }),
-      fetchMeirimPolygons(lon, lat).catch(e => {
-        log("warn", `[TABA-G] Meirim polygon fetch failed: ${e.message}`);
-        return [];
-      }),
-    ]);
-
-    if (docsResult) {
-      out.stats.withDocuments   = plans.filter(p => p.documents.takanon || p.documents.tasrit || p.documents.mmg).length;
-      out.stats.failedDownloads = docsResult.totalFailed;
-      log("ok", `[TABA-C] ${docsResult.totalDownloaded} downloaded, ${docsResult.totalFailed} skipped`);
+    // Step C — record document sources (no network; files download on
+    // demand via /taba-docs). Step G — Meirim polygons.
+    if (onProgress) onProgress({ step: "taba_docs", label: "Indexing plan documents", percent: 80 });
+    try {
+      out.stats.withDocuments = writePlanDocSources(plans);
+      log("ok", `[TABA-C] ${out.stats.withDocuments} plans with document sources (files fetch on demand)`);
+    } catch (e) {
+      log("warn", `[TABA-C] Document indexing failed: ${e.message}`);
     }
+
+    const meirimPolygons = await fetchMeirimPolygons(lon, lat).catch(e => {
+      log("warn", `[TABA-G] Meirim polygon fetch failed: ${e.message}`);
+      return [];
+    });
 
     // Keep only Meirim polygons near the site — the distance query can return
     // plans from across the city, which drowned the TABA map in blue shapes.
@@ -1300,8 +1247,41 @@ async function fetchCBSData(lat, lon) {
     }
   }
   if (!localityCode) {
-    log("warn", "  [CBS] LocalityCode undetermined — defaulting to Tel Aviv (6900)");
-    localityCode = 6900;
+    // Reverse-geocode the site to a locality name and look it up in the
+    // census. The old behavior defaulted straight to Tel Aviv (6900), which
+    // showed Tel Aviv demographics for sites in other cities entirely.
+    try {
+      const rev = await axios.get("https://nominatim.openstreetmap.org/reverse", {
+        params: { lat, lon, format: "json", zoom: 10, "accept-language": "he" },
+        headers: { "User-Agent": "map-context/1.0 (contact@cuboidstudio.com)" },
+        timeout: 8000,
+      });
+      const cityName = rev.data?.address?.city ?? rev.data?.address?.town ?? rev.data?.address?.village ?? null;
+      if (cityName) {
+        log("info", `  [CBS] Reverse-geocoded locality: "${cityName}"`);
+        const lookup = await cbsDatastore(CENSUS_RESOURCE, { q: cityName, limit: 1 });
+        localityCode = lookup?.records?.[0]?.LocalityCode
+          ? Number(lookup.records[0].LocalityCode) || null
+          : null;
+        if (localityCode) {
+          log("ok", `  [CBS] LocalityCode via reverse geocode: ${localityCode}`);
+          if (!out.areaName) out.areaName = cityName;
+        }
+      }
+    } catch (e) {
+      log("warn", `  [CBS] Reverse geocode failed: ${e.message}`);
+    }
+  }
+  if (!localityCode) {
+    // Last resort: Tel Aviv — but only when the site is actually in Tel Aviv.
+    const inTLV = lat >= 32.02 && lat <= 32.15 && lon >= 34.73 && lon <= 34.87;
+    if (inTLV) {
+      log("warn", "  [CBS] LocalityCode undetermined — defaulting to Tel Aviv (6900)");
+      localityCode = 6900;
+    } else {
+      log("warn", "  [CBS] LocalityCode undetermined outside Tel Aviv — leaving demographics empty");
+      return out;
+    }
   }
 
   // Fetch all statistical areas in this locality
@@ -1450,7 +1430,7 @@ ${areaRow}${metricRow("Population", cbsData.metrics.populationCount)}${metricRow
 
 // ---- HTML template -----------------------------------------
 
-function buildHTML(config, center, layers, elevation, cbsData, tabaData) {
+function buildHTML(config, center, layers, elevation, cbsData, tabaData, opts = {}) {
   log("info", "Compiling HTML dashboard...");
 
   const { buildings, streets, trees, registrationBlocks, transit, institutions } = layers;
@@ -1472,17 +1452,24 @@ function buildHTML(config, center, layers, elevation, cbsData, tabaData) {
   const institutionsJSON  = JSON.stringify(institutions        ?? { type: "FeatureCollection", features: [] });
   const tabaJSON          = JSON.stringify(tabaData ?? { gush: null, chelka: null, plans: [], stats: {} });
 
-  // CBS precomputed strings
+  // CBS precomputed strings. With deferredCbs the dashboard ships before
+  // demographics resolve: the sidebar shows a loading placeholder and a
+  // client script fills it from /cbs-data (whatever-loads-first-shows-first).
+  const deferredCbs = !!(opts && opts.deferredCbs);
   const cbsStatAreaJSON     = cbsData?.boundaryGeoJSON ? JSON.stringify(cbsData.boundaryGeoJSON) : "null";
-  const cbsDemographicsHTML = cbsData ? buildDemographicsHTML(cbsData) : "";
-  const cbsLayerToggleHTML  = cbsData?.boundaryGeoJSON
+  const cbsDemographicsHTML = cbsData
+    ? `<div id="cbs-demographics-slot">${buildDemographicsHTML(cbsData)}</div>`
+    : deferredCbs
+    ? `<div id="cbs-demographics-slot"><div class="section"><div class="section-title">Demographics</div><div style="font-size:11px;color:#bbb">טוען נתונים…</div></div></div>`
+    : "";
+  const cbsLayerToggleHTML  = (cbsData?.boundaryGeoJSON
     ? `    <div class="layer-toggle" id="toggle-stat-area" style="--color:#c47fe8">
       <div class="toggle-switch on" style="--color:#c47fe8"></div>
       <div class="toggle-dot" style="--color:#c47fe8"></div>
       <span class="toggle-label">Statistical Area</span>
       <span class="toggle-count">1</span>
     </div>`
-    : "";
+    : "") + `\n<span id="cbs-toggle-slot"></span>`;
   const cbsLayerJS = cbsData?.boundaryGeoJSON
     ? `
 const DATA_STAT_AREA = ${cbsStatAreaJSON};
@@ -1497,9 +1484,81 @@ const layerStatArea = L.geoJSON(DATA_STAT_AREA, {
   }
 }).addTo(map);
 makeToggle('toggle-stat-area', layerStatArea);`
+    : deferredCbs
+    ? `
+// Deferred demographics: fetch after the dashboard is already interactive.
+(function() {
+  function esc(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
+  function metricRow(label, metric, suffix) {
+    var val = metric && metric.value;
+    var src = metric && metric.source;
+    var display = (val !== null && val !== undefined) ? esc(val) + (suffix || '') : '<span style="color:#3a3a3a">N/A</span>';
+    var cite = src ? ' <a href="' + esc(src.url) + '" target="_blank" rel="noopener" title="' + esc(src.label) + '" style="color:#555;font-size:9px;text-decoration:none">&#8599;</a>' : '';
+    return '<div class="stat-row"><span class="stat-label">' + label + '</span><span class="stat-value">' + display + cite + '</span></div>';
+  }
+  function renderCbs(cbs) {
+    var slot = document.getElementById('cbs-demographics-slot');
+    if (!slot) return;
+    var m = cbs.metrics || {};
+    var h = '<div class="section"><div class="section-title">Demographics</div>';
+    if (cbs.areaName) h += '<div class="stat-row"><span class="stat-label">Area</span><span class="stat-value" style="font-size:10px;max-width:140px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + esc(cbs.areaName) + '">' + esc(cbs.areaName) + '</span></div>';
+    h += metricRow('Population', m.populationCount);
+    h += metricRow('Pop. Density', m.populationDensity, ' /km²');
+    h += metricRow('Vehicles / 1,000', m.vehicleOwnershipRate);
+    h += metricRow('Homeowners', m.housingTenureOwners, '%');
+    h += metricRow('Renters', m.housingTenureRenters, '%');
+    if (cbs.boundarySrc) h += '<div style="margin-top:8px;font-size:9px;color:#3a3a3a">Boundary: <a href="' + esc(cbs.boundarySrc.url) + '" target="_blank" rel="noopener" style="color:#555;text-decoration:none">' + esc(cbs.boundarySrc.label) + '</a></div>';
+    h += '</div>';
+    slot.innerHTML = h;
+  }
+  function addStatAreaLayer(geojson) {
+    var layer = L.geoJSON(geojson, {
+      style: { color: '#c47fe8', weight: 2, fillColor: '#c47fe8', fillOpacity: 0.08 },
+    }).addTo(map);
+    var tSlot = document.getElementById('cbs-toggle-slot');
+    if (!tSlot) return;
+    tSlot.outerHTML = '<div class="layer-toggle" id="toggle-stat-area" style="--color:#c47fe8">' +
+      '<div class="toggle-switch on" style="--color:#c47fe8"></div>' +
+      '<div class="toggle-dot" style="--color:#c47fe8"></div>' +
+      '<span class="toggle-label">Statistical Area</span>' +
+      '<span class="toggle-count">1</span></div>';
+    makeToggle('toggle-stat-area', layer);
+  }
+  fetch('/cbs-data?lat=' + SITE_CENTER.lat + '&lon=' + SITE_CENTER.lon)
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(cbs) {
+      if (!cbs) throw new Error('empty');
+      renderCbs(cbs);
+      if (cbs.boundaryGeoJSON) addStatAreaLayer(cbs.boundaryGeoJSON);
+    })
+    .catch(function() {
+      var slot = document.getElementById('cbs-demographics-slot');
+      if (slot) slot.innerHTML = '<div class="section"><div class="section-title">Demographics</div><div style="font-size:11px;color:#bbb">N/A</div></div>';
+    });
+})();`
     : "";
 
   const elevNote = elevation !== null ? `${elevation}m ASL` : "N/A";
+
+  // Coverage notices — dismissible pills on the map telling the user when a
+  // layer is missing or heights are mostly estimated for this location.
+  const bldgTotal   = buildings?.features?.length ?? 0;
+  const bldgDefault = (buildings?.features ?? []).filter(f => f.properties?.heightSource === "default").length;
+  const defaultHeightPct = bldgTotal ? Math.round((bldgDefault / bldgTotal) * 100) : 0;
+  const coverageNotices = [];
+  if (bldgTotal === 0) {
+    coverageNotices.push("אין נתוני מבנים זמינים לאזור זה");
+  } else if (defaultHeightPct >= 50) {
+    coverageNotices.push(`נתוני גובה חלקיים — ${defaultHeightPct}% מהמבנים בגובה משוער`);
+  }
+  if ((trees?.features?.length ?? 0) === 0) {
+    coverageNotices.push("אין נתוני עצים זמינים לאזור זה");
+  }
+  const coverageNoticesHTML = coverageNotices.length
+    ? `<div id="coverage-notices">` + coverageNotices.map(t =>
+        `<div class="coverage-notice"><span>&#9888; ${t}</span><span class="coverage-notice-close" onclick="this.parentElement.remove()">&#x2715;</span></div>`
+      ).join("") + `</div>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="he">
@@ -1637,6 +1696,22 @@ makeToggle('toggle-stat-area', layerStatArea);`
 
   #map-wrapper { flex: 1; order: 1; position: relative; min-height: 0; }
   #map-2d, #map-3d { position: absolute; inset: 0; }
+
+  /* Layer-coverage notices (missing/estimated data for this location) */
+  #coverage-notices {
+    position: absolute; bottom: 14px; right: 14px; z-index: 1500;
+    display: flex; flex-direction: column; gap: 6px; direction: rtl;
+    pointer-events: none;
+  }
+  .coverage-notice {
+    background: #fffbe8; border: 1px solid #e8d48a; color: #8a6d1a;
+    font-size: 11px; padding: 6px 10px; border-radius: 6px;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+    pointer-events: auto;
+  }
+  .coverage-notice-close { cursor: pointer; color: #b89b3e; font-size: 10px; }
+  .coverage-notice-close:hover { color: #8a6d1a; }
   @keyframes atlas-spin { to { transform: rotate(360deg); } }
   .leaflet-container { background: #e8e8e4; }
 
@@ -1720,6 +1795,28 @@ makeToggle('toggle-stat-area', layerStatArea);`
   .taba-detail-mavat { margin-top: 8px; padding-top: 7px; border-top: 1px solid #e8e8e8; }
   .taba-detail-mavat a { font-size: 10px; color: #999; text-decoration: none; }
   .taba-detail-mavat a:hover { color: #4a90d9; }
+
+  /* Document-analysis block inside the detail panel */
+  #taba-analysis-slot { margin-top: 8px; padding-top: 7px; border-top: 1px solid #e8e8e8; }
+  .taba-analysis-status { font-size: 10px; color: #aaa; direction: rtl; }
+  .taba-governs-badge {
+    display: inline-block; background: #2d8a4e; color: #fff;
+    padding: 2px 8px; border-radius: 10px; font-size: 9px; font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .taba-rights-table { width: 100%; border-collapse: collapse; direction: rtl; margin-top: 4px; }
+  .taba-rights-table th, .taba-rights-table td {
+    font-size: 10px; padding: 3px 5px; border-bottom: 1px solid #f0f0f0; text-align: right;
+  }
+  .taba-rights-table th { color: #999; font-weight: 600; }
+  .taba-rights-table td { color: #444; }
+  .taba-landuse-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; direction: rtl; }
+  .taba-landuse-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 9px; color: #666;
+  }
+  .taba-landuse-chip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .taba-analysis-src { font-size: 9px; color: #bbb; margin-top: 6px; direction: rtl; }
   .taba-detail-close {
     float: left; cursor: pointer; color: #bbb; font-size: 15px; line-height: 1;
     padding: 0 2px; margin-top: -2px;
@@ -1862,6 +1959,7 @@ ${cbsDemographicsHTML}
     <div id="map-wrapper">
       <div id="map-2d"></div>
       <div id="map-3d"></div>
+${coverageNoticesHTML}
     </div>
   </div><!-- /panel-map -->
 
@@ -2516,8 +2614,116 @@ function showTABADetail(plan) {
   var docs = tabaDocLinks(plan, null);
   if (docs.length) h += '<div class="taba-detail-docs">' + docs.join('') + '</div>';
   h += '<div class="taba-detail-mavat"><a href="' + mavatUrl + '" target="_blank" rel="noopener">&#8599; פתח במקור (מבא&quot;ת)</a></div>';
+  h += '<div id="taba-analysis-slot"><div class="taba-analysis-status">טוען ניתוח מסמכים…</div></div>';
   panel.innerHTML = h;
   panel.classList.add('visible');
+  loadTABAAnalysis(plan.planNumber);
+}
+
+// ── TABA document analysis (lazy, server-parsed) ─────────────
+// Fetches /taba-analysis/<plan> — land-use polygons from the plan's mmg.zip
+// (or Xplan), and building rights from the takanon's Table 5. First request
+// per plan parses on the server; afterwards it's served from disk cache.
+
+var tabaAnalysisCache = {};   // planNumber -> record
+var tabaLandUseLayer  = null; // Leaflet layer of the selected plan's land use
+
+function clearTABALandUse() {
+  if (tabaMap && tabaLandUseLayer) { tabaMap.removeLayer(tabaLandUseLayer); }
+  tabaLandUseLayer = null;
+}
+
+function loadTABAAnalysis(planNumber) {
+  if (tabaAnalysisCache[planNumber]) {
+    renderTABAAnalysis(planNumber, tabaAnalysisCache[planNumber]);
+    return;
+  }
+  var url = '/taba-analysis/' + encodeURIComponent(planNumber) +
+    '?lat=' + SITE_CENTER.lat + '&lon=' + SITE_CENTER.lon;
+  fetch(url)
+    .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(record) {
+      tabaAnalysisCache[planNumber] = record;
+      renderTABAAnalysis(planNumber, record);
+    })
+    .catch(function() {
+      var slot = document.getElementById('taba-analysis-slot');
+      // fetch fails on CLI file:// output (no server) — degrade quietly
+      if (slot) slot.innerHTML = '<div class="taba-analysis-status">ניתוח מסמכים אינו זמין</div>';
+    });
+}
+
+function renderTABAAnalysis(planNumber, record) {
+  // Only render if this plan is still the selected one
+  var selected = document.querySelector('.taba-plan-item.selected');
+  if (!selected || selected.dataset.plan !== planNumber) return;
+  var slot = document.getElementById('taba-analysis-slot');
+  if (!slot) return;
+
+  var h = '';
+  if (record.governsSitePoint) h += '<div class="taba-governs-badge">חלה על נקודת האתר</div>';
+
+  // Rights table (takanon Table 5)
+  var rights = record.rights || [];
+  if (rights.length) {
+    var cols = [
+      { key: 'farPercent',      label: '% בנייה' },
+      { key: 'coveragePercent', label: 'תכסית' },
+      { key: 'floorsAbove',     label: 'קומות' },
+      { key: 'floorsBelow',     label: 'מרתף' },
+      { key: 'heightM',         label: 'גובה (מ\\')' },
+      { key: 'units',           label: 'יח"ד' },
+    ].filter(function(c) { return rights.some(function(r) { return r[c.key] != null; }); });
+    h += '<table class="taba-rights-table"><tr><th>ייעוד</th>';
+    cols.forEach(function(c) { h += '<th>' + c.label + '</th>'; });
+    h += '</tr>';
+    rights.forEach(function(r) {
+      h += '<tr><td>' + (r.designation || '—') + '</td>';
+      cols.forEach(function(c) { h += '<td>' + (r[c.key] != null ? r[c.key] : '—') + '</td>'; });
+      h += '</tr>';
+    });
+    h += '</table>';
+    var pg = rights[0].source && rights[0].source.page;
+    if (pg) h += '<div class="taba-analysis-src">מתוך התקנון, עמ\\' ' + pg + '</div>';
+  }
+
+  // Land-use overlay + legend
+  clearTABALandUse();
+  var landUse = record.landUse || [];
+  if (landUse.length && tabaMap) {
+    var group = L.featureGroup();
+    landUse.forEach(function(lu) {
+      if (!lu.geometry) return;
+      var layer = L.geoJSON(lu.geometry, {
+        style: { color: lu.color, weight: 1, fillColor: lu.color, fillOpacity: 0.35 },
+      });
+      var tip = (lu.designation || 'ייעוד לא ידוע') + (lu.areaDunams ? ' · ' + lu.areaDunams + ' דונם' : '');
+      layer.bindTooltip(tip, { sticky: true, direction: 'top' });
+      group.addLayer(layer);
+    });
+    group.addTo(tabaMap);
+    tabaLandUseLayer = group;
+
+    var seen = {};
+    h += '<div class="taba-landuse-legend">';
+    landUse.forEach(function(lu) {
+      var key = lu.designation || 'אחר';
+      if (seen[key]) return; seen[key] = 1;
+      h += '<span class="taba-landuse-chip"><i style="background:' + lu.color + '"></i>' + key + '</span>';
+    });
+    h += '</div>';
+  }
+
+  if (!rights.length && !landUse.length) {
+    h += '<div class="taba-analysis-status">אין נתונים ניתנים לחילוץ ממסמכי התכנית' +
+      (record.notes && record.notes.length ? ' (' + record.notes[0] + ')' : '') + '</div>';
+  } else {
+    var srcNames = { 'mmg': 'ממ"ג', 'xplan': 'Xplan', 'takanon-text': 'תקנון' };
+    var srcs = (record.sources || []).map(function(s) { return srcNames[s] || s; });
+    if (srcs.length) h += '<div class="taba-analysis-src">מקורות: ' + srcs.join(', ') + ' · הנתונים אינפורמטיביים בלבד — המסמך המחייב הוא התקנון</div>';
+  }
+
+  slot.innerHTML = h;
 }
 
 function closeTABADetail() {
@@ -2525,6 +2731,7 @@ function closeTABADetail() {
   if (panel) { panel.classList.remove('visible'); panel.innerHTML = ''; }
   document.querySelectorAll('.taba-plan-item.selected').forEach(function(el) { el.classList.remove('selected'); });
   if (tabaMap && tabaHighlightLayer) { tabaMap.removeLayer(tabaHighlightLayer); tabaHighlightLayer = null; }
+  clearTABALandUse();
 }
 
 function selectTABAPlan(planNumber) {
@@ -2541,8 +2748,9 @@ function selectTABAPlan(planNumber) {
   if (plan) showTABADetail(plan);
 
   if (tabaMap) {
-    // Remove previous highlight
+    // Remove previous highlight and previous plan's land-use overlay
     if (tabaHighlightLayer) { tabaMap.removeLayer(tabaHighlightLayer); tabaHighlightLayer = null; }
+    clearTABALandUse();
 
     var planLayer = tabaLayers[planNumber];
     if (planLayer) {
@@ -2610,8 +2818,11 @@ async function runAnalysis(address, onProgress, options = {}) {
 
   // Serve a recent identical run (same rounded center + radius) from the
   // disk cache — a fresh run re-fetches every live layer and takes minutes.
+  // Deferred-CBS runs cache under a distinct key so /analyze (full data)
+  // never gets served a demographics-less variant.
+  const deferCbs   = !!options.deferCbs;
   const resultsDir = path.resolve(path.join(CONFIG.cache_dir ?? "./cache", "_results"));
-  const cacheKey   = resultCacheKey(center.lat, center.lon, radius);
+  const cacheKey   = resultCacheKey(center.lat, center.lon, radius) + (deferCbs ? "-fast" : "");
   const cached     = readCachedResult(resultsDir, cacheKey);
   if (cached) {
     log("ok", `Result cache hit: ${cacheKey}`);
@@ -2627,10 +2838,12 @@ async function runAnalysis(address, onProgress, options = {}) {
   log("info", `Output dir: ${outDir}`);
   log("info", `Cache dir:  ${cacheDir}`);
 
-  // All seven data layers are independent — fetch them in parallel so wall
-  // time is the slowest layer, not the sum of all of them. Progress advances
-  // as layers complete (monotonic, so late finishers can't move it backward).
-  const LAYER_COUNT = 7;
+  // All data layers are independent — fetch them in parallel so wall time is
+  // the slowest layer, not the sum of all of them. Progress advances as
+  // layers complete (monotonic, so late finishers can't move it backward).
+  // With deferCbs (the web app), demographics load lazily via /cbs-data
+  // after the dashboard is already on screen.
+  const LAYER_COUNT = deferCbs ? 6 : 7;
   let completedLayers = 0;
   let lastPercent = 10;
   const emit = (step, label, percent) => {
@@ -2659,12 +2872,14 @@ async function runAnalysis(address, onProgress, options = {}) {
       .then(layerDone("Registration blocks loaded")),
     fetchElevation(center.lat, center.lon)
       .then(layerDone("Elevation loaded")),
-    fetchCBSData(center.lat, center.lon)
-      .catch(e => {
-        log("warn", `CBS data fetch failed: ${e.message}`);
-        return null;
-      })
-      .then(layerDone("Demographics loaded")),
+    deferCbs
+      ? Promise.resolve(null)
+      : fetchCBSData(center.lat, center.lon)
+          .catch(e => {
+            log("warn", `CBS data fetch failed: ${e.message}`);
+            return null;
+          })
+          .then(layerDone("Demographics loaded")),
     fetchTABAData(center.lat, center.lon, slug, cacheDir, outDir, tabaProgress)
       .catch(e => {
         log("warn", `TABA data fetch failed: ${e.message}`);
@@ -2682,7 +2897,7 @@ async function runAnalysis(address, onProgress, options = {}) {
 
   if (cb) cb({ step: "compiling", label: "Compiling dashboard", percent: 95 });
   const runConfig = { ...CONFIG, address, radius_meters: radius };
-  const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData);
+  const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData, { deferredCbs: deferCbs });
 
   const data = {
     site_center: center,
@@ -2698,8 +2913,11 @@ async function runAnalysis(address, onProgress, options = {}) {
       lightrail: transit.lightRail,
       train:     transit.train,
     },
-    demographics: cbsData  ?? null,
-    taba:         tabaData ?? null,
+    demographics: cbsData ?? null,
+    // With deferred CBS the demographics field is null; once resolved the
+    // same data is served at this URL.
+    demographicsUrl: deferCbs ? `/cbs-data?lat=${center.lat}&lon=${center.lon}` : null,
+    taba: tabaData ?? null,
   };
 
   // Cache only successful runs (any fatal layer failure throws before this).
@@ -2709,7 +2927,7 @@ async function runAnalysis(address, onProgress, options = {}) {
   return { html, data };
 }
 
-module.exports = { runAnalysis, buildHTML, TABA_DOCS_DIR };
+module.exports = { runAnalysis, buildHTML, fetchCBSData, TABA_DOCS_DIR };
 
 // ---- CLI entry point ---------------------------------------
 
