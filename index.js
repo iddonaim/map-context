@@ -1540,6 +1540,26 @@ makeToggle('toggle-stat-area', layerStatArea);`
 
   const elevNote = elevation !== null ? `${elevation}m ASL` : "N/A";
 
+  // Coverage notices — dismissible pills on the map telling the user when a
+  // layer is missing or heights are mostly estimated for this location.
+  const bldgTotal   = buildings?.features?.length ?? 0;
+  const bldgDefault = (buildings?.features ?? []).filter(f => f.properties?.heightSource === "default").length;
+  const defaultHeightPct = bldgTotal ? Math.round((bldgDefault / bldgTotal) * 100) : 0;
+  const coverageNotices = [];
+  if (bldgTotal === 0) {
+    coverageNotices.push("אין נתוני מבנים זמינים לאזור זה");
+  } else if (defaultHeightPct >= 50) {
+    coverageNotices.push(`נתוני גובה חלקיים — ${defaultHeightPct}% מהמבנים בגובה משוער`);
+  }
+  if ((trees?.features?.length ?? 0) === 0) {
+    coverageNotices.push("אין נתוני עצים זמינים לאזור זה");
+  }
+  const coverageNoticesHTML = coverageNotices.length
+    ? `<div id="coverage-notices">` + coverageNotices.map(t =>
+        `<div class="coverage-notice"><span>&#9888; ${t}</span><span class="coverage-notice-close" onclick="this.parentElement.remove()">&#x2715;</span></div>`
+      ).join("") + `</div>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="he">
 <head>
@@ -1676,6 +1696,22 @@ makeToggle('toggle-stat-area', layerStatArea);`
 
   #map-wrapper { flex: 1; order: 1; position: relative; min-height: 0; }
   #map-2d, #map-3d { position: absolute; inset: 0; }
+
+  /* Layer-coverage notices (missing/estimated data for this location) */
+  #coverage-notices {
+    position: absolute; bottom: 14px; right: 14px; z-index: 1500;
+    display: flex; flex-direction: column; gap: 6px; direction: rtl;
+    pointer-events: none;
+  }
+  .coverage-notice {
+    background: #fffbe8; border: 1px solid #e8d48a; color: #8a6d1a;
+    font-size: 11px; padding: 6px 10px; border-radius: 6px;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+    pointer-events: auto;
+  }
+  .coverage-notice-close { cursor: pointer; color: #b89b3e; font-size: 10px; }
+  .coverage-notice-close:hover { color: #8a6d1a; }
   @keyframes atlas-spin { to { transform: rotate(360deg); } }
   .leaflet-container { background: #e8e8e4; }
 
@@ -1923,6 +1959,7 @@ ${cbsDemographicsHTML}
     <div id="map-wrapper">
       <div id="map-2d"></div>
       <div id="map-3d"></div>
+${coverageNoticesHTML}
     </div>
   </div><!-- /panel-map -->
 
@@ -2877,12 +2914,10 @@ async function runAnalysis(address, onProgress, options = {}) {
       train:     transit.train,
     },
     demographics: cbsData ?? null,
-    // With deferred CBS, demographics arrive lazily — embedding apps fetch
-    // them from this URL instead of the (null) demographics field.
+    // With deferred CBS the demographics field is null; once resolved the
+    // same data is served at this URL.
     demographicsUrl: deferCbs ? `/cbs-data?lat=${center.lat}&lon=${center.lon}` : null,
-    // analysisUrlTemplate: embedding apps (Cuboid Studio) can fetch per-plan
-    // structured land-use + rights from GET /taba-analysis/<planNumber>.
-    taba: tabaData ? { ...tabaData, analysisUrlTemplate: "/taba-analysis/{planNumber}" } : null,
+    taba: tabaData ?? null,
   };
 
   // Cache only successful runs (any fatal layer failure throws before this).

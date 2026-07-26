@@ -31,9 +31,8 @@ Make the app answer three questions it currently can't:
    every plan touching the gush; nothing marks the ones whose boundary
    contains the analyzed parcel.
 
-Downstream payoff: `data.taba.analysis` gives Cuboid Studio enough to
-extrude massing envelopes (footprint × floors/height) — the concrete
-convergence step item 3 of the audit's "convergence surface" points at.
+The structured output is part of this app's data payload; anything a
+consumer does with it downstream is outside this repo's scope.
 
 ## Source inventory, ranked by structure (use cheapest signal first)
 
@@ -96,8 +95,8 @@ convergence step item 3 of the audit's "convergence surface" points at.
   indicator when values came from OCR/heuristics.
 - **Sidebar:** a "Planning rights" section — governing plans at the site
   point with their headline numbers.
-- **Data payload:** `data.taba.analysis` array for embedding apps
-  (Cuboid Studio massing).
+- **Data payload:** per-plan analysis is served by `GET
+  /taba-analysis/:plan`; the run payload itself stays unchanged.
 
 ## Phases & estimates
 

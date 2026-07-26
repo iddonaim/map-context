@@ -63,17 +63,24 @@ that fixes it:
 or OSM quality), gush/chelka → full TABA chain, trees where data exists,
 and no address can 500 the run because of a missing municipal layer.
 
-### Discussion points
+### Decisions (2026-07-26)
 
-1. Buildings *heights* outside TLV will be weaker: GovMap's national layer
-   may lack heights (probe tells us); OSM `building:levels` covers major
-   cities patchily. Default-height massing (9.6 m) fills the rest —
-   acceptable for context, visible in the 3D atlas. OK?
-2. Trees outside the big cities will be sparse-to-empty. Show honest
-   per-layer source + count notices rather than pretending coverage.
-3. Which cities does the demo actually need? If it's TLV + 2–3 known
-   cities, per-city GIS adapters (Jerusalem/Haifa) may beat OSM quality
-   and are ~½ day each after N2.
+1. **Insufficient height data must be visible to the user.** ✅ Shipped:
+   the dashboard map shows dismissible coverage notices — "no building
+   data for this location", "heights partial — N% estimated" (when ≥50%
+   of footprints carry the default height), "no tree data". The same
+   notices should carry the winning provider name once N2 lands.
+2. **Trees: same visibility, plus widen the source search.** New task
+   **N4 — tree-data source survey (½ day, network-enabled machine):**
+   inventory municipal tree surveys (סקר עצים) exposed by the
+   Jerusalem / Haifa / Beer-Sheva GIS portals, GovMap vegetation layers,
+   and any data.gov.il tree datasets; record endpoints + schemas here,
+   then wire the usable ones as providers.
+3. **Basic city set: Tel Aviv, Jerusalem, Haifa, Beer-Sheva.** Today only
+   Tel Aviv has an adapter — Jerusalem/Haifa/Beer-Sheva municipal ArcGIS
+   adapters are part of N3 (~½ day each once the provider chain exists),
+   with GovMap national + OSM as the everywhere-else fallback. Anything
+   beyond these four cities is out of scope for launch.
 
 ## 4 — Pre-caching Tel Aviv (static-layer cache)
 

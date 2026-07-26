@@ -32,9 +32,9 @@ app.get("/taba-docs/:safe/:file", async (req, res) => {
 });
 
 // ---- Endpoint: deferred CBS demographics ---------------------
-// The web dashboard ships before demographics resolve; it (and embedding
-// apps, via data.demographicsUrl) fetch them here. fetchCBSData keeps its
-// own per-coordinate disk cache, so repeats are instant.
+// The web dashboard ships before demographics resolve and fetches them
+// here (the data payload's demographicsUrl points here too). fetchCBSData
+// keeps its own per-coordinate disk cache, so repeats are instant.
 
 const cbsRuns = new Map(); // in-flight dedupe by rounded coordinate
 
