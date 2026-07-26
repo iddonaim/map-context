@@ -384,6 +384,21 @@ const HTML = `<!DOCTYPE html>
   @keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
 
   .pin-hint { font-size: 11px; color: #999; margin-top: 10px; }
+  .locate-btn {
+    background: #fff;
+    border: 2px solid rgba(0,0,0,.2);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #333;
+    cursor: pointer;
+    user-select: none;
+    direction: rtl;
+    white-space: nowrap;
+    box-shadow: 0 1px 4px rgba(0,0,0,.15);
+  }
+  .locate-btn:hover { background: #f4f4f4; }
 
   .progress-wrap {
     margin-top: 20px;
@@ -606,8 +621,8 @@ var BOOT_SITE = __BOOT_SITE__;
     pinMarker = L.marker([lat, lon]).addTo(pinMap);
   }
 
-  pinMap.on('click', function (ev) {
-    var lat = ev.latlng.lat, lon = ev.latlng.lng;
+  // Select a point as the analysis site (map click / my-location).
+  function selectPoint(lat, lon) {
     setPin(lat, lon);
     selectedLat = lat;
     selectedLon = lon;
@@ -626,7 +641,50 @@ var BOOT_SITE = __BOOT_SITE__;
         }
       })
       .catch(function () {});
+  }
+
+  pinMap.on('click', function (ev) {
+    selectPoint(ev.latlng.lat, ev.latlng.lng);
   });
+
+  // ---- "My location" control -------------------------------
+  // Browser geolocation (needs HTTPS or localhost, and user permission;
+  // inside an embedding iframe the iframe also needs allow="geolocation").
+
+  var locateControl = L.control({ position: 'topleft' });
+  locateControl.onAdd = function () {
+    var btn = L.DomUtil.create('div', 'locate-btn');
+    btn.innerHTML = '&#9678; המיקום שלי';
+    btn.title = 'מרכז את המפה על מיקומך';
+    L.DomEvent.disableClickPropagation(btn);
+    btn.addEventListener('click', function () {
+      if (!navigator.geolocation) {
+        btn.innerHTML = 'אין תמיכה במיקום';
+        return;
+      }
+      btn.innerHTML = '&#9678; מאתר...';
+      navigator.geolocation.getCurrentPosition(
+        function (pos) {
+          btn.innerHTML = '&#9678; המיקום שלי';
+          var lat = pos.coords.latitude, lon = pos.coords.longitude;
+          // Outside the supported Israel bounds — center but don't select.
+          if (lat < 29 || lat > 34 || lon < 33.5 || lon > 36) {
+            btn.innerHTML = 'המיקום מחוץ לישראל';
+            pinMap.setView([lat, lon], 10);
+            return;
+          }
+          pinMap.setView([lat, lon], 16);
+          selectPoint(lat, lon);
+        },
+        function () {
+          btn.innerHTML = 'איתור מיקום נכשל';
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    });
+    return btn;
+  };
+  locateControl.addTo(pinMap);
 
   // ---- Autocomplete ----------------------------------------
 
