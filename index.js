@@ -361,7 +361,32 @@ out skel qt;
   return features;
 }
 
-// ---- Buildings: GovMap → Tel Aviv GIS fallback -------------
+// ---- Provider chains (see docs/LAUNCH_SCOPE.md N1-N3) -------
+//
+// Each layer tries an ordered list of providers; the first one that returns
+// features wins, and the winner's name is recorded so the UI can say where
+// the data came from. A provider failure or empty result falls through to
+// the next; if every provider fails the layer is EMPTY, never fatal.
+
+async function firstProvider(label, providers) {
+  for (const p of providers) {
+    try {
+      const data = await p.fetch();
+      const count = data?.features?.length ?? 0;
+      if (count > 0) {
+        log("ok", `${label}: provider "${p.name}" → ${count} features`);
+        return { data, source: p.name };
+      }
+      log("info", `${label}: provider "${p.name}" returned 0 features — trying next`);
+    } catch (e) {
+      log("warn", `${label}: provider "${p.name}" failed (${e.message}) — trying next`);
+    }
+  }
+  log("warn", `${label}: no provider returned data — layer will be empty`);
+  return { data: { type: "FeatureCollection", features: [] }, source: "none" };
+}
+
+// ---- Buildings: GovMap → Tel Aviv GIS → OSM footprints ------
 
 const GOVMAP_BASE     = "https://ags.govmap.gov.il/arcgis/rest/services";
 const TELAVIV_MAPSVR  = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/IView2/MapServer";
@@ -369,33 +394,15 @@ const TELAVIV_MAPSVR  = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/IView
 const BUILDING_SERVICE_KW = ["building", "mivne", "parcel", "cadastr", "gush"];
 const BUILDING_LAYER_KW   = ["מבנים", "building", "מבנן", "mivne"];
 
-async function fetchGovMapBuildings(lat, lon, radius) {
-  log("info", "Fetching building footprints...");
+const HEIGHT_ATTR_KWS = ["HEIGHT", "HEIGHT_M", "BLDG_HEIGHT", "גובה", "GOVA"];
+const FLOOR_ATTR_KWS  = ["FLOOR_NUM", "FLOORS", "NUM_FLOORS", "STORIES", "KOMOTOT", "קומות", "MANAIM", "FLOOR_CNT"];
 
-  const bbox = radiusToBbox(lat, lon, radius);
-  let layerUrl, layerName;
-
-  // 1 — Try GovMap service catalog
-  try {
-    ({ layerUrl, layerName } = await discoverLayerInServiceCatalog(
-      GOVMAP_BASE, BUILDING_SERVICE_KW, BUILDING_LAYER_KW, "esriGeometryPolygon"
-    ));
-    log("ok", `  Using GovMap layer: "${layerName}"`);
-  } catch (e) {
-    log("warn", `  GovMap unavailable (${e.message})`);
-    // 2 — Fall back to Tel Aviv GIS
-    log("info", `  Falling back to Tel Aviv GIS: ${TELAVIV_MAPSVR.replace("https://", "")}`);
-    ({ layerUrl, layerName } = await discoverLayerInMapServer(
-      TELAVIV_MAPSVR, BUILDING_LAYER_KW, "esriGeometryPolygon"
-    ));
-    log("ok", `  Using Tel Aviv GIS layer: "${layerName}"`);
-  }
-
-  const raw = await arcgisQueryFeatures(layerUrl, bbox);
-
-  // ── Height extraction ─────────────────────────────────────
-  const HEIGHT_ATTR_KWS = ["HEIGHT", "HEIGHT_M", "BLDG_HEIGHT", "גובה", "GOVA"];
-  const FLOOR_ATTR_KWS  = ["FLOOR_NUM", "FLOORS", "NUM_FLOORS", "STORIES", "KOMOTOT", "קומות", "MANAIM", "FLOOR_CNT"];
+/** ArcGIS buildings: query a discovered layer, extract heights from attrs,
+ *  gap-fill from OSM building:levels, default the rest to 9.6 m. */
+async function fetchArcgisBuildings(discover, lat, lon, radius) {
+  const { layerUrl, layerName } = await discover();
+  log("ok", `  Buildings layer: "${layerName}"`);
+  const raw = await arcgisQueryFeatures(layerUrl, radiusToBbox(lat, lon, radius));
 
   const needsOSM = [];
   const features = raw.map((f) => {
@@ -421,7 +428,6 @@ async function fetchGovMapBuildings(lat, lon, radius) {
     return feat;
   }).filter(Boolean);
 
-  // ── OSM fallback ──────────────────────────────────────────
   let osmBuildings = [];
   if (needsOSM.length > 0) {
     log("info", `  ${needsOSM.length} buildings lack height data — querying OSM building:levels...`);
@@ -455,20 +461,78 @@ async function fetchGovMapBuildings(lat, lon, radius) {
     }
   }
 
-  log("ok", `Buildings fetched: ${features.length}`);
   log("info", `  Height sources — real attr: ${realHeights}, OSM levels: ${osmHeights}, default 9.6m: ${defaultHeights}`);
   return { type: "FeatureCollection", features };
 }
 
-// ---- Trees: Tel Aviv Open Data (gisn.tel-aviv.gov.il) ------
+/** Pure: OSM elements (ways tagged building) → building polygon features
+ *  with heights from height/building:levels tags, else 9.6 m default. */
+function osmBuildingsFromElements(elements) {
+  const nodeMap = {};
+  for (const el of elements) {
+    if (el.type === "node") nodeMap[el.id] = [el.lon, el.lat];
+  }
+  const features = [];
+  for (const el of elements) {
+    if (el.type !== "way" || !el.tags?.building) continue;
+    const coords = (el.nodes || []).map(n => nodeMap[n]).filter(Boolean);
+    if (coords.length < 4) continue;
+
+    let height = null, src = null;
+    const h = parseFloat(el.tags.height);
+    const levels = Number(el.tags["building:levels"]);
+    if (!isNaN(h) && h > 0) { height = h; src = "attr"; }
+    else if (!isNaN(levels) && levels > 0) { height = levels * 3.2; src = "osm"; }
+    else { height = 9.6; src = "default"; }
+
+    features.push({
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [coords] },
+      properties: { ...el.tags, osm_id: el.id, height, heightSource: src, layer: "buildings" },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+async function fetchOSMBuildings(lat, lon, radius) {
+  const query = `
+[out:json][timeout:60];
+(
+  way["building"](around:${radius},${lat},${lon});
+);
+out body;
+>;
+out skel qt;
+`.trim();
+  const data = await fetchOverpass(query);
+  return osmBuildingsFromElements(data.elements || []);
+}
+
+function fetchBuildingsChain(lat, lon, radius) {
+  log("info", "Fetching building footprints...");
+  return firstProvider("Buildings", [
+    {
+      name: "govmap",
+      fetch: () => fetchArcgisBuildings(
+        () => discoverLayerInServiceCatalog(GOVMAP_BASE, BUILDING_SERVICE_KW, BUILDING_LAYER_KW, "esriGeometryPolygon"),
+        lat, lon, radius),
+    },
+    {
+      name: "telaviv-gis",
+      fetch: () => fetchArcgisBuildings(
+        () => discoverLayerInMapServer(TELAVIV_MAPSVR, BUILDING_LAYER_KW, "esriGeometryPolygon"),
+        lat, lon, radius),
+    },
+    { name: "osm", fetch: () => fetchOSMBuildings(lat, lon, radius) },
+  ]);
+}
+
+// ---- Trees: Tel Aviv Open Data → OSM natural=tree -----------
 
 const TREE_LAYER_KW = ["עצים", "tree", "etz", "vegetation"];
 
 async function fetchTelAvivTrees(lat, lon, radius) {
-  log("info", "Fetching tree canopy data from Tel Aviv Open Data...");
-
   const bbox = radiusToBbox(lat, lon, radius);
-
   const { layerUrl, layerName } = await discoverLayerInMapServer(
     TELAVIV_MAPSVR, TREE_LAYER_KW, "esriGeometryPoint"
   );
@@ -483,30 +547,82 @@ async function fetchTelAvivTrees(lat, lon, radius) {
       })
     )
     .filter(Boolean);
-  log("ok", `Trees fetched: ${features.length}`);
   return { type: "FeatureCollection", features };
 }
 
-// ---- Registration blocks (גושים) ---------------------------
-
-const REGISTRATION_KW = ["גושים", "רישום", "gush", "cadastral", "parcel"];
-
-async function fetchRegistrationBlocks(lat, lon, radius) {
-  log("info", "Fetching registration blocks (גושים) from Tel Aviv GIS...");
-  const bbox = radiusToBbox(lat, lon, radius);
-  try {
-    const { layerUrl, layerName } = await discoverLayerInMapServer(
-      TELAVIV_MAPSVR, REGISTRATION_KW, "esriGeometryPolygon"
-    );
-    log("ok", `  Discovered registration layer: "${layerName}"`);
-    const raw = await arcgisQueryFeatures(layerUrl, bbox);
-    const features = raw.map(f => esriPolygonToGeoJSON(f, { layer: "registration" })).filter(Boolean);
-    log("ok", `Registration blocks fetched: ${features.length}`);
-    return { type: "FeatureCollection", features };
-  } catch (e) {
-    log("warn", `Registration blocks unavailable: ${e.message}`);
-    return { type: "FeatureCollection", features: [] };
+/** Pure: OSM node elements tagged natural=tree → tree point features. */
+function osmTreesFromElements(elements) {
+  const features = [];
+  for (const el of elements) {
+    if (el.type !== "node" || el.tags?.natural !== "tree") continue;
+    if (el.lon == null || el.lat == null) continue;
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [el.lon, el.lat] },
+      properties: {
+        species:       el.tags.species ?? el.tags.genus ?? null,
+        species_latin: el.tags["species:latin"] ?? null,
+        osm_id: el.id,
+        layer: "trees",
+      },
+    });
   }
+  return { type: "FeatureCollection", features };
+}
+
+async function fetchOSMTrees(lat, lon, radius) {
+  const query = `
+[out:json][timeout:30];
+(
+  node["natural"="tree"](around:${radius},${lat},${lon});
+);
+out body;
+`.trim();
+  const data = await fetchOverpass(query);
+  return osmTreesFromElements(data.elements || []);
+}
+
+function fetchTreesChain(lat, lon, radius) {
+  log("info", "Fetching tree canopy data...");
+  return firstProvider("Trees", [
+    { name: "telaviv-gis", fetch: () => fetchTelAvivTrees(lat, lon, radius) },
+    { name: "osm",         fetch: () => fetchOSMTrees(lat, lon, radius) },
+  ]);
+}
+
+// ---- Registration blocks (גושים): TLV GIS → GovMap parcels --
+
+const REGISTRATION_KW      = ["גושים", "רישום", "gush", "cadastral", "parcel"];
+const CADASTRE_SERVICE_KW  = ["parcel", "cadastr", "gush", "kadaster", "cadastre"];
+
+// Ordered cadastre layer discoveries — shared by the registration-blocks
+// layer and the TABA parcel-at-point lookup so both go national together.
+function cadastreLayerDiscoveries() {
+  return [
+    {
+      name: "telaviv-gis",
+      discover: () => discoverLayerInMapServer(TELAVIV_MAPSVR, REGISTRATION_KW, "esriGeometryPolygon"),
+    },
+    {
+      name: "govmap",
+      discover: () => discoverLayerInServiceCatalog(GOVMAP_BASE, CADASTRE_SERVICE_KW, REGISTRATION_KW, "esriGeometryPolygon"),
+    },
+  ];
+}
+
+function fetchRegistrationBlocks(lat, lon, radius) {
+  log("info", "Fetching registration blocks (גושים)...");
+  const bbox = radiusToBbox(lat, lon, radius);
+  return firstProvider("Registration blocks", cadastreLayerDiscoveries().map(c => ({
+    name: c.name,
+    fetch: async () => {
+      const { layerUrl, layerName } = await c.discover();
+      log("ok", `  Registration layer: "${layerName}"`);
+      const raw = await arcgisQueryFeatures(layerUrl, bbox);
+      const features = raw.map(f => esriPolygonToGeoJSON(f, { layer: "registration" })).filter(Boolean);
+      return { type: "FeatureCollection", features };
+    },
+  })));
 }
 
 // ============================================================
@@ -563,50 +679,55 @@ async function fetchParcelAtPoint(lat, lon) {
 
   const pointGeom = JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } });
 
-  try {
-    const { layerUrl } = await discoverLayerInMapServer(
-      TELAVIV_MAPSVR, REGISTRATION_KW, "esriGeometryPolygon"
-    );
+  // Same cadastre providers as the registration-blocks layer: TLV GIS first,
+  // GovMap national parcels for everywhere else.
+  for (const candidate of cadastreLayerDiscoveries()) {
+    try {
+      const { layerUrl } = await candidate.discover();
 
-    const res = await axios.get(`${layerUrl}/query`, {
-      params: {
-        f: "json",
-        geometry: pointGeom,
-        geometryType: "esriGeometryPoint",
-        inSR: "4326",
-        spatialRel: "esriSpatialRelIntersects",
-        outSR: "4326",
-        outFields: "*",
-        returnGeometry: "false",
-      },
-      headers: ARCGIS_HEADERS,
-      timeout: 20000,
-    });
+      const res = await axios.get(`${layerUrl}/query`, {
+        params: {
+          f: "json",
+          geometry: pointGeom,
+          geometryType: "esriGeometryPoint",
+          inSR: "4326",
+          spatialRel: "esriSpatialRelIntersects",
+          outSR: "4326",
+          outFields: "*",
+          returnGeometry: "false",
+        },
+        headers: ARCGIS_HEADERS,
+        timeout: 20000,
+      });
 
-    if (res.data.error) throw new Error(`ArcGIS error: ${JSON.stringify(res.data.error)}`);
+      if (res.data.error) throw new Error(`ArcGIS error: ${JSON.stringify(res.data.error)}`);
 
-    let features = res.data.features || [];
+      let features = res.data.features || [];
 
-    if (!features.length) {
-      log("info", "[TABA-A]   Point query returned 0 — trying 10 m bbox fallback");
-      features = await arcgisQueryFeatures(layerUrl, radiusToBbox(lat, lon, 10));
+      if (!features.length) {
+        log("info", `[TABA-A]   ${candidate.name}: point query returned 0 — trying 10 m bbox fallback`);
+        features = await arcgisQueryFeatures(layerUrl, radiusToBbox(lat, lon, 10));
+      }
+
+      if (features.length) {
+        const attrs = features[0].attributes || {};
+        log("info", `[TABA-A]   All parcel attributes: ${JSON.stringify(attrs)}`);
+
+        const gush   = pickAttr(attrs, "ms_gush",   "gush",   "block",  "gushnum",  "gush_num");
+        const chelka = pickAttr(attrs, "ms_chelka", "chelka", "parcel", "lot",      "chnum");
+
+        if (gush !== null || chelka !== null) {
+          log("ok", `[TABA-A] Cadastral via ${candidate.name}: Gush=${gush}, Chelka=${chelka}`);
+          return {
+            gush:   gush   !== null ? String(gush)   : null,
+            chelka: chelka !== null ? String(chelka) : null,
+          };
+        }
+        log("info", `[TABA-A]   ${candidate.name}: parcel found but no gush/chelka attributes — trying next provider`);
+      }
+    } catch (e) {
+      log("warn", `[TABA-A] ${candidate.name} parcel query failed: ${e.message}`);
     }
-
-    if (features.length) {
-      const attrs = features[0].attributes || {};
-      log("info", `[TABA-A]   All parcel attributes: ${JSON.stringify(attrs)}`);
-
-      const gush   = pickAttr(attrs, "ms_gush",   "gush",   "block",  "gushnum",  "gush_num");
-      const chelka = pickAttr(attrs, "ms_chelka", "chelka", "parcel", "lot",      "chnum");
-
-      log("ok", `[TABA-A] Cadastral: Gush=${gush}, Chelka=${chelka}`);
-      return {
-        gush:   gush   !== null ? String(gush)   : null,
-        chelka: chelka !== null ? String(chelka) : null,
-      };
-    }
-  } catch (e) {
-    log("warn", `[TABA-A] Registration blocks query failed: ${e.message}`);
   }
 
   log("warn", "[TABA-A] Could not determine gush/chelka — proceeding without");
@@ -1541,18 +1662,30 @@ makeToggle('toggle-stat-area', layerStatArea);`
   const elevNote = elevation !== null ? `${elevation}m ASL` : "N/A";
 
   // Coverage notices — dismissible pills on the map telling the user when a
-  // layer is missing or heights are mostly estimated for this location.
+  // layer is missing, from a lower-quality fallback source, or mostly
+  // estimated for this location.
+  const layerSources = (opts && opts.layerSources) || {};
   const bldgTotal   = buildings?.features?.length ?? 0;
   const bldgDefault = (buildings?.features ?? []).filter(f => f.properties?.heightSource === "default").length;
   const defaultHeightPct = bldgTotal ? Math.round((bldgDefault / bldgTotal) * 100) : 0;
   const coverageNotices = [];
   if (bldgTotal === 0) {
     coverageNotices.push("אין נתוני מבנים זמינים לאזור זה");
-  } else if (defaultHeightPct >= 50) {
-    coverageNotices.push(`נתוני גובה חלקיים — ${defaultHeightPct}% מהמבנים בגובה משוער`);
+  } else {
+    if (layerSources.buildings === "osm") {
+      coverageNotices.push("נתוני מבנים מבוססי OSM — ייתכן כיסוי חלקי");
+    }
+    if (defaultHeightPct >= 50) {
+      coverageNotices.push(`נתוני גובה חלקיים — ${defaultHeightPct}% מהמבנים בגובה משוער`);
+    }
   }
   if ((trees?.features?.length ?? 0) === 0) {
     coverageNotices.push("אין נתוני עצים זמינים לאזור זה");
+  } else if (layerSources.trees === "osm") {
+    coverageNotices.push("נתוני עצים מ-OSM — כיסוי חלקי");
+  }
+  if (layerSources.streets === "none") {
+    coverageNotices.push("טעינת רחובות ותחבורה נכשלה");
   }
   const coverageNoticesHTML = coverageNotices.length
     ? `<div id="coverage-notices">` + coverageNotices.map(t =>
@@ -2860,13 +2993,19 @@ async function runAnalysis(address, onProgress, options = {}) {
   emit("layers", "Fetching map layers", 10);
   const tabaProgress = cb ? (p) => emit(p.step, p.label, 40) : null;
 
-  const [buildings, trees, osmParsed, registrationBlocks, elevation, cbsData, tabaData] = await Promise.all([
-    fetchGovMapBuildings(center.lat, center.lon, radius)
+  const [buildingsRes, treesRes, osmParsed, registrationRes, elevation, cbsData, tabaData] = await Promise.all([
+    fetchBuildingsChain(center.lat, center.lon, radius)
       .then(layerDone("Buildings loaded")),
-    fetchTelAvivTrees(center.lat, center.lon, radius)
+    fetchTreesChain(center.lat, center.lon, radius)
       .then(layerDone("Trees loaded")),
     fetchOverpass(buildCombinedOverpassQuery(center.lat, center.lon, radius))
       .then(parseAllOSMData)
+      .catch(e => {
+        // Streets are core but not worth failing the whole run over.
+        log("warn", `Streets/transit fetch failed: ${e.message} — continuing without`);
+        const fc = () => ({ type: "FeatureCollection", features: [] });
+        return { streets: fc(), transit: { lightRail: fc(), train: fc(), busLines: fc() }, institutions: fc(), _failed: true };
+      })
       .then(layerDone("Streets & transit loaded")),
     fetchRegistrationBlocks(center.lat, center.lon, radius)
       .then(layerDone("Registration blocks loaded")),
@@ -2888,8 +3027,21 @@ async function runAnalysis(address, onProgress, options = {}) {
       .then(layerDone("Statutory plans loaded")),
   ]);
 
+  const buildings          = buildingsRes.data;
+  const trees              = treesRes.data;
+  const registrationBlocks = registrationRes.data;
   const { streets, transit, institutions } = osmParsed;
   const layers = { buildings, streets, trees, registrationBlocks, transit, institutions };
+
+  // Which provider supplied each layer ("none" = every provider failed).
+  const layerSources = {
+    buildings:    buildingsRes.source,
+    trees:        treesRes.source,
+    registration: registrationRes.source,
+    streets:      osmParsed._failed ? "none" : "osm",
+  };
+  delete osmParsed._failed;
+  log("info", `Layer sources: ${JSON.stringify(layerSources)}`);
 
   if (tabaData) {
     log("ok", `TABA summary: ${tabaData.stats.totalPlans} plans, ${tabaData.stats.withDocuments} with documents, ${tabaData.stats.failedDownloads} failed downloads`);
@@ -2897,12 +3049,13 @@ async function runAnalysis(address, onProgress, options = {}) {
 
   if (cb) cb({ step: "compiling", label: "Compiling dashboard", percent: 95 });
   const runConfig = { ...CONFIG, address, radius_meters: radius };
-  const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData, { deferredCbs: deferCbs });
+  const html = buildHTML(runConfig, center, layers, elevation, cbsData, tabaData, { deferredCbs: deferCbs, layerSources });
 
   const data = {
     site_center: center,
     site_radius: radius,
     address,
+    layerSources,
     elevation: elevation ?? null,
     buildings,
     streets,
@@ -2927,7 +3080,10 @@ async function runAnalysis(address, onProgress, options = {}) {
   return { html, data };
 }
 
-module.exports = { runAnalysis, buildHTML, fetchCBSData, TABA_DOCS_DIR };
+module.exports = {
+  runAnalysis, buildHTML, fetchCBSData, TABA_DOCS_DIR,
+  _internal: { firstProvider, osmBuildingsFromElements, osmTreesFromElements },
+};
 
 // ---- CLI entry point ---------------------------------------
 
