@@ -62,3 +62,10 @@ test("back button navigates to / instead of reloading (keeps params from re-runn
   assert.ok(!body.includes("window.location.reload()"), "back button still uses location.reload()");
   assert.match(body, /window\.location\.href = '\/'/);
 });
+
+test("back button tells an embedding app the analysis was reset", async () => {
+  const { body } = await getRoot();
+  assert.match(body, /postMessage\(\{ type: 'analysis-reset' \}, '\*'\)/);
+  // Only when embedded — standalone must not touch window.parent.
+  assert.match(body, /if \(window\.parent !== window\) \{\s*window\.parent\.postMessage\(\{ type: 'analysis-reset' \}/);
+});
