@@ -259,3 +259,73 @@ test("ensurePlanDoc serves an existing file and nulls on missing sources", async
   // No sources.json → cannot download the missing one
   assert.strictEqual(await tabaDocs.ensurePlanDoc("P1", "takanon.pdf", { docsDir }), null);
 });
+
+// ── Calibration round 1 fixes ────────────────────────────────
+
+test("zipLooksComplete: complete zip passes, truncated fails", () => {
+  const zip = makeFixtureZip();
+  assert.strictEqual(tabaDocs.zipLooksComplete(zip), true);
+  assert.strictEqual(tabaDocs.zipLooksComplete(zip.slice(0, zip.length - 30)), false);
+});
+
+test("wgs84AreaSqm: ~100 m square in degrees ≈ 10,000 m²", () => {
+  const dLat = 100 / 110574;
+  const dLon = 100 / (111320 * Math.cos(32.06 * Math.PI / 180));
+  const sq = { type: "Polygon", coordinates: [[
+    [34.77, 32.06], [34.77 + dLon, 32.06], [34.77 + dLon, 32.06 + dLat], [34.77, 32.06 + dLat], [34.77, 32.06],
+  ]]};
+  const area = _internal.wgs84AreaSqm(sq);
+  assert.ok(Math.abs(area - 10000) < 100, `area ${area}`);
+});
+
+test("Xplan-style MAVAT_NAME attribute is picked as designation", () => {
+  const v = _internal.pickAttrByKeyword({ MAVAT_CODE: 120, MAVAT_NAME: "מגורים ד'" },
+    ["mavat_name", "landuse_he", "yeud"]);
+  assert.strictEqual(v, "מגורים ד'");
+});
+
+test("itemsToRows merges horizontally-split cell fragments", () => {
+  const rows = rights._internal.itemsToRows([
+    { str: "אחוזי", x: 100, y: 700, width: 30 },
+    { str: "בניה",  x: 132, y: 700, width: 25 },   // 2px gap → same cell
+    { str: "תכסית", x: 250, y: 700, width: 30 },   // far → separate cell
+  ]);
+  assert.strictEqual(rows[0].cells.length, 2);
+  const strs = rows[0].cells.map(c => c.str);
+  assert.ok(strs.includes("אחוזי בניה"), JSON.stringify(strs));
+});
+
+test("parseRightsTable handles a two-row stacked header", () => {
+  const items = [
+    // header row 1
+    { str: "ייעוד",  x: 500, y: 700 },
+    { str: "אחוזי",  x: 400, y: 700 },
+    { str: "מס'",    x: 300, y: 700 },
+    // header row 2 (stacked continuations)
+    { str: "בניה",   x: 400, y: 685 },
+    { str: "קומות",  x: 300, y: 685 },
+    // data
+    { str: "מגורים", x: 500, y: 655 },
+    { str: "160%",   x: 400, y: 655 },
+    { str: "7",      x: 300, y: 655 },
+  ];
+  const parsed = rights._internal.parseRightsTable(rights._internal.itemsToRows(items));
+  assert.ok(parsed, "two-row header parsed");
+  assert.strictEqual(parsed[0].designation, "מגורים");
+  assert.strictEqual(parsed[0].farPercent, 160);
+  assert.strictEqual(parsed[0].floorsAbove, 7);
+});
+
+test("parseRightsTable loose mode accepts designation + one metric", () => {
+  const items = [
+    { str: "ייעוד",      x: 500, y: 700 },
+    { str: "מס' קומות",  x: 300, y: 700 },
+    { str: "מגורים ג'",  x: 500, y: 670 },
+    { str: "4",          x: 300, y: 670 },
+  ];
+  const rows = rights._internal.itemsToRows(items);
+  assert.strictEqual(rights._internal.parseRightsTable(rows), null);          // strict: too few columns
+  const loose = rights._internal.parseRightsTable(rows, { loose: true });
+  assert.ok(loose);
+  assert.strictEqual(loose[0].floorsAbove, 4);
+});
