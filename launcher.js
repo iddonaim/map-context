@@ -56,6 +56,25 @@ app.get("/cbs-data", async (req, res) => {
   }
 });
 
+// ---- Endpoint: data-source probe (N0 calibration) ------------
+// Browser-friendly wrapper around scripts/probe-sources.js so the probe can
+// run from the deployed server without shell access: open /probe, wait
+// ~30-60s, copy the text. Read-only (catalog ?f=json GETs only).
+
+let probeRun = null;
+
+app.get("/probe", async (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  try {
+    if (!probeRun) {
+      probeRun = require("./scripts/probe-sources").runProbe().finally(() => { probeRun = null; });
+    }
+    res.send(await probeRun);
+  } catch (err) {
+    res.status(500).send(`probe failed: ${err.message}`);
+  }
+});
+
 // ---- Endpoint: Nominatim reverse proxy (pin-drop → address) --
 
 app.get("/reverse", async (req, res) => {
