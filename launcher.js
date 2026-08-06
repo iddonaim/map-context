@@ -780,7 +780,18 @@ var BOOT_SITE = __BOOT_SITE__;
     // Navigate to a clean "/" — never reload. When the page was booted via
     // query params, a reload would re-trigger the auto-run instead of
     // returning to the picker.
-    backBtn.addEventListener('click', function () { window.location.href = '/'; });
+    //
+    // Announce the reset upward first: an embedding app (Cuboid Studio) holds
+    // the finished analysis as its "active site" and boots this page from it,
+    // so without this it would silently re-attach the old site the moment the
+    // page reloads — the user had to detach it by hand every time. Standalone
+    // (no parent) this is a no-op and the navigation is unchanged.
+    backBtn.addEventListener('click', function () {
+      if (window.parent !== window) {
+        window.parent.postMessage({ type: 'analysis-reset' }, '*');
+      }
+      window.location.href = '/';
+    });
 
     var frame = document.createElement('iframe');
     frame.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9998';
