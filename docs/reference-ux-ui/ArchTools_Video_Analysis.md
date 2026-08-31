@@ -1,3 +1,5 @@
+> HISTORIC (2026-08-30): frozen external reference (analysis of the third-party ArchTools demo, not this repo). Kept as reference material; nothing supersedes it because nothing depends on it. Do not cite as current documentation of map-context.
+
 # ArchTools — Video Analysis & Claude Code Process Document
 
 > **Companion to:** `ArchTools_Screenshot_Analysis.docx`  

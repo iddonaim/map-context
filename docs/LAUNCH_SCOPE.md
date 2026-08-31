@@ -165,3 +165,17 @@ tab reads as broken; a hidden one doesn't exist). Priority order:
   (`layersFound`, `notes`).
 - `test/launcherBoot.test.js` + picker now depend on unpkg for Leaflet —
   fine online; the CLI dashboard equally already did.
+
+## TABA scope remnants (carried 2026-08-30 from `TABA_ANALYSIS_SCOPE.md`, now historic)
+
+Four items from the TABA document-analysis spec were still open when that
+doc was marked historic; they move here so they are not lost:
+
+1. **P4 — scanned-plans OCR** (tesseract `heb` and/or env-gated LLM
+   extraction, confidence-flagged) — deferred by default, never built.
+2. **The promised UI disclaimer** (rights synthesis is out of scope, and
+   "the UI carries a disclaimer saying so") — not found in code.
+3. **The "Planning rights" sidebar section** (governing plans at the site)
+   — not found in code.
+4. **Open decision 3 — LLM-assisted extraction**: strictly no-key, or
+   optional env-gated? Never answered; blocks any P4 work.
