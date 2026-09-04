@@ -179,3 +179,9 @@ doc was marked historic; they move here so they are not lost:
    — not found in code.
 4. **Open decision 3 — LLM-assisted extraction**: strictly no-key, or
    optional env-gated? Never answered; blocks any P4 work.
+
+One more open item, carried 2026-08-30 from `AUDIT_2026-07-12.md` (now
+historic) — its only finding still true at HEAD:
+
+5. **`config.json` still holds a real residential address** as the default
+   run target — replace it with a public landmark before any public deploy.
