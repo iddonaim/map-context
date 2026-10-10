@@ -1,3 +1,5 @@
+> HISTORIC (2026-08-30): completed spec, kept as process record. P0–P3 shipped in `lib/tabaAnalysis.js` / `lib/takanonRights.js` (its own header says so). Its four still-open remnants were copied into `docs/LAUNCH_SCOPE.md` on 2026-08-30 so they are not lost. Do not cite as current.
+
 # TABA Document Analysis — Scope (2026-07-26)
 
 > Status: **P0–P3 implemented 2026-07-26** (`lib/tabaAnalysis.js`,
