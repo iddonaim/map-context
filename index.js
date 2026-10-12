@@ -2195,7 +2195,7 @@ const map = L.map('map-2d', { zoomControl: true, attributionControl: true })
 
 const basePositron = L.tileLayer(
   'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-  { attribution: '© OpenStreetMap contributors', maxZoom: 19 }
+  { attribution: '© OpenStreetMap contributors', maxZoom: 20, maxNativeZoom: 19 }
 ).addTo(map);
 
 const baseSatellite = L.tileLayer(
@@ -2625,7 +2625,7 @@ function initTABAMap() {
 
   var tabaPositron = L.tileLayer(
     'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }
+    { attribution: '&copy; OpenStreetMap contributors', maxZoom: 20, maxNativeZoom: 19 }
   ).addTo(tabaMap);
 
   var tabaSatellite = L.tileLayer(
