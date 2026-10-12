@@ -2194,8 +2194,8 @@ const map = L.map('map-2d', { zoomControl: true, attributionControl: true })
   .setView([SITE_CENTER.lat, SITE_CENTER.lon], 17);
 
 const basePositron = L.tileLayer(
-  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-  { attribution: '© OpenStreetMap contributors © CARTO', maxZoom: 20 }
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { attribution: '© OpenStreetMap contributors', maxZoom: 19 }
 ).addTo(map);
 
 const baseSatellite = L.tileLayer(
@@ -2624,8 +2624,8 @@ function initTABAMap() {
   tabaMap = L.map('taba-map', { zoomControl: true }).setView([SITE_CENTER.lat, SITE_CENTER.lon], 15);
 
   var tabaPositron = L.tileLayer(
-    'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-    { attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 20 }
+    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }
   ).addTo(tabaMap);
 
   var tabaSatellite = L.tileLayer(
@@ -2643,7 +2643,7 @@ function initTABAMap() {
     btn.addEventListener('click', function() {
       sat = !sat;
       sat ? tabaMap.addLayer(tabaSatellite) : tabaMap.removeLayer(tabaSatellite);
-      btn.textContent = sat ? 'CartoDB' : 'Satellite';
+      btn.textContent = sat ? 'Map' : 'Satellite';
       btn.style.background = sat ? '#333' : '#fff';
       btn.style.color      = sat ? '#fff' : '';
     });

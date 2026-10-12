@@ -631,8 +631,8 @@ var BOOT_SITE = __BOOT_SITE__;
   var pinMarker = null;
   var pinMap = L.map('pin-map').setView(
     BOOT_SITE ? [BOOT_SITE.lat, BOOT_SITE.lon] : [32.07, 34.78], 13);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 20,
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors', maxZoom: 19,
   }).addTo(pinMap);
 
   function setPin(lat, lon) {
